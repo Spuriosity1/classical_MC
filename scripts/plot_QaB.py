@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Plot SSF intensity at (0,0,Qz) and symmetry-equivalent q-points vs a scan parameter."""
 
-from plot_ssf import load_file, apply_phases, split_fixed_varying, compute_phase_factors
+from plot_ssf import load_file, normalize_ssf, split_fixed_varying
 import argparse
 import numpy as np
 import h5py
@@ -14,99 +14,45 @@ def qz_to_idx(qz_frac, k_dim):
     return int(round(qz_frac * k_dim)) % k_dim
 
 
-def load_corr2(path):
-    """Load static_corr_2 and n_seeds from a merged HDF5 file (legacy fallback).
-
-    Used only when the file predates var_inter/var_intra (acc_runs.py).
-    Returns (corr_2, n_seeds) or (None, None) if the dataset is absent.
-    corr_2 shape: [n_corr, n_T, n_k, n_sl, n_sl] complex.
-    """
-    with h5py.File(path, "r") as f:
-        ssf = f["/ssf"]
-        if "static_corr_2" not in ssf:
-            return None, None
-        raw = ssf["static_corr_2"][:]
-        corr_2 = raw[..., 0] + 1j * raw[..., 1]
-        energy = f["/energy"]
-        n_seeds = int(energy["n_seeds"][()]) if "n_seeds" in energy else None
-    return corr_2, n_seeds
-
-
 def load_ssf_variance(path):
     """Load var_inter / var_intra / n_seeds from a merged HDF5 file (acc_runs.py).
 
-    var_inter : (biased, /K) variance of the per-seed mean correlator across seeds.
-    var_intra : sum over seeds of the per-seed (within-run) single-sample variance.
-    Returns (var_inter, var_intra, n_seeds); either array is None if the
-    corresponding dataset is absent (e.g. raw seed files lacked static_corr_2
-    at merge time, so var_intra could not be computed).
-    Arrays have shape [n_corr, n_T, n_k, n_sl, n_sl] complex (Re/Im variance
-    stored as the real/imaginary components, not a true complex variance).
+    var_inter : (biased, /K) variance of the per-seed mean S(q) across seeds.
+    var_intra : sum over seeds of the per-seed (within-run) single-sample
+                variance of S(q).
+    Both are already sublattice-contracted scalars (the phase fold is done in
+    the C++ writer / propagated linearly through acc_runs), stored as
+    [n_corr, n_T, n_k, 2] with the last axis carrying the Re/Im-part variances.
+    Returns (var_inter, var_intra, n_seeds) as dicts label -> [n_T, k0,k1,k2]
+    (real, = Re-part variance), or None for a variance whose dataset is absent.
     """
+    def reshape_var(raw, corr_lookup, k_dims):
+        # Re-part variance is what matters for the real observable S(q).
+        real = raw[..., 0]                            # [n_corr, n_T, n_k]
+        k0, k1, k2 = k_dims
+        real = real.reshape(len(corr_lookup), -1, k0, k1, k2)
+        return {label: real[i] for i, label in enumerate(corr_lookup)}
+
     var_inter = var_intra = None
     with h5py.File(path, "r") as f:
         ssf = f["/ssf"]
+        k_dims = ssf.attrs["k_dims"][:].astype(int)
+        corr_lookup = [s.decode() if isinstance(s, bytes) else s
+                       for s in ssf["corr_lookup"][:]]
         if "var_inter" in ssf:
-            raw = ssf["var_inter"][:]
-            var_inter = raw[..., 0] + 1j * raw[..., 1]
+            var_inter = reshape_var(ssf["var_inter"][:], corr_lookup, k_dims)
         if "var_intra" in ssf:
-            raw = ssf["var_intra"][:]
-            var_intra = raw[..., 0] + 1j * raw[..., 1]
+            var_intra = reshape_var(ssf["var_intra"][:], corr_lookup, k_dims)
         energy = f["/energy"]
         n_seeds = int(energy["n_seeds"][()]) if "n_seeds" in energy else None
     return var_inter, var_intra, n_seeds
 
 
-def contract_corr2(corr_2, corr_lookup, sl_positions, k_dims):
-    """Phase-contract a per-(mu,nu) second-moment/variance array.
-
-    Shared by static_corr_2 (legacy), var_inter and var_intra — all have the
-    same [..., mu, nu] layout as the mean correlator, so the same sublattice
-    phase contraction applies.
-
-    Returns dict label -> array [n_T, k0, k1, k2], real-valued.
-    The raw contracted value is Σ_{mu,nu} Re(w * corr_2); for static_corr_2
-    this must additionally be divided by (n_ssf^2 * n_spins^2) in
-    post-processing, whereas var_inter/var_intra are already properly
-    normalised variances (divide by n_spins^2 only — see se_from_inter/intra).
-    """
-    w = compute_phase_factors(k_dims, sl_positions)
-    contracted = np.real(np.einsum("kmn,ctkmn->ctk", w, corr_2))
-    k0, k1, k2 = k_dims
-    contracted = contracted.reshape(len(corr_lookup), -1, k0, k1, k2)
-    return {label: contracted[i] for i, label in enumerate(corr_lookup)}
-
-
-def cross_seed_se(W_q, intensity, n_seeds, n_ssf_t, n_spins):
-    """Approximate standard error of the mean SSF from cross-seed second moment.
-
-    Legacy fallback for merged files that only stored static_corr_2 (no
-    var_inter/var_intra). Superseded by se_from_inter() where available.
-
-    W_q      : Re(Σ_{mu,nu} w * corr_2)[k_q], i.e. unscaled contracted second moment
-    intensity : already-computed per-spin SSF mean = Re(Σ w * corr) / (n_ssf * n_spins)
-    n_seeds  : number of seeds K
-    n_ssf_t  : total sample count for this temperature (= K * n_per_seed)
-    n_spins  : total spin count
-
-    Approximation: cross-terms between different (mu,nu) pairs are dropped when
-    computing Var[Σ_mu,nu w C_{mu,nu}] from the element-wise second moment.
-    """
-    if n_seeds < 2:
-        return np.nan
-    # <s^2>_approx per seed = W_q * K / (n_ssf_t^2 * n_spins^2)
-    s2_approx = W_q * n_seeds / (n_ssf_t**2 * n_spins**2)
-    var_between = (n_seeds / (n_seeds - 1)) * (s2_approx - intensity**2)
-    # SE of the mean = sqrt(var_between / K)
-    return np.sqrt(max(float(var_between), 0.0) / n_seeds)
-
-
 def se_from_inter(W_inter, n_seeds, n_spins):
     """Standard error of the multi-seed mean SSF from var_inter.
 
-    W_inter : Re(Σ_{mu,nu} w * var_inter)[k_q], summed over diagonal components —
-              the biased (/K) population variance of the per-seed mean
-              correlator across seeds.
+    W_inter : var_inter[k_q], summed over diagonal components — the biased
+              (/K) population variance of the per-seed mean S(q) across seeds.
     Bessel-corrected SE of the K-seed mean: sqrt(W_inter / (K-1)) / n_spins.
     """
     if n_seeds is None or n_seeds < 2:
@@ -118,8 +64,8 @@ def se_from_intra(W_intra, n_seeds, n_per_seed, n_spins):
     """Standard error contribution to the multi-seed mean SSF from
     within-run (intra-seed) sampling noise.
 
-    W_intra    : Re(Σ_{mu,nu} w * var_intra)[k_q], summed over diagonal components —
-                 Σ_seeds Var[single MC sample of C | seed].
+    W_intra    : var_intra[k_q], summed over diagonal components —
+                 Σ_seeds Var[single MC sample of S(q) | seed].
     n_per_seed : MC samples per seed at this temperature (= n_ssf_t / K).
 
     Treats samples within a seed as independent (no autocorrelation

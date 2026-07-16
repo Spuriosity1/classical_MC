@@ -21,57 +21,36 @@ def load_file(path):
         E2     = f["/energy/E2"][:]
         n_E    = f["/energy/n_samples"][:]
 
-        raw          = f["/ssf/static_corr"][:]   # [n_corr, n_T, n_k, n_sl, n_sl, 2]
+        raw          = f["/ssf/static_corr"][:]   # [n_corr, n_T, n_k, 2]
         corr_lookup  = [s.decode() if isinstance(s, bytes) else s
                         for s in f["/ssf/corr_lookup"][:]]
-        sl_positions = f["/ssf/sl_positions"][:]  # [n_sl, 3] int64
+        sl_positions = f["/ssf/sl_positions"][:]  # [n_sl, 3] int64 (metadata)
         k_dims       = f["/ssf"].attrs["k_dims"][:].astype(int)   # [3]
         n_spins      = int(f["/ssf"].attrs["n_spins"])
         ssf_T        = f["/ssf/T_list"][:]        # sorted ascending
         n_ssf        = f["/ssf/n_samples"][:]
 
-    corr = raw[..., 0] + 1j * raw[..., 1]  # [n_corr, n_T, n_k, n_sl, n_sl]
+    # static_corr is already the sublattice-contracted scalar S(q) (the phase
+    # fold Σ_{mu,nu} exp(+i q·(r_mu-r_nu)) conj(Ã_mu) Ã_nu is done in the C++
+    # writer), summed over MC samples.
+    corr = raw[..., 0] + 1j * raw[..., 1]  # [n_corr, n_T, n_k]
     return (recip, index_cell,
             T_list, E, E2, n_E,
             corr, corr_lookup, sl_positions, k_dims, n_spins, ssf_T, n_ssf)
 
 
-def compute_phase_factors(k_dims, sl_positions):
-    """Return w[k_flat, mu, nu] = exp(2πi Σ_j K_j*(r_mu-r_nu)_j / k_dims_j).
+def normalize_ssf(corr, corr_lookup, k_dims, n_ssf):
+    """Sample-normalise the contracted correlator and reshape to a k-grid.
 
-    This is the sublattice structure-factor phase correction needed because
-    the raw DFT does not include exp(-i q·r_mu).  Uses the identity
-    b_i · a_j = 2π δ_{ij}, so q · r = 2π Σ_j K_j * r_j / k_dims_j when
-    r is expressed in fractional primitive-cell coordinates (integers for
-    sublattice positions stored in sl_positions).
+    The sublattice phase contraction is performed in the C++ writer, so
+    ``corr`` is already the scalar S(q) summed over samples.  Here we take the
+    real part (S(q) is real for diagonal correlators), divide by the per-T
+    sample count, and reshape flat k into (k0, k1, k2).
+
+    Returns dict label -> array of shape [n_T, k0, k1, k2], real-valued.
     """
-    k0, k1, k2 = k_dims
-    K0, K1, K2 = np.mgrid[0:k0, 0:k1, 0:k2]
-    K = np.stack([K0.ravel(), K1.ravel(), K2.ravel()], axis=1)  # [n_k, 3]
-
-    K_scaled = K / k_dims                          # [n_k, 3], fractional
-    dr = (sl_positions[:, np.newaxis, :]            # [n_sl, n_sl, 3]
-        - sl_positions[np.newaxis, :, :]).astype(float)
-
-    # phase[k, mu, nu] = 2π Σ_j K_scaled[k,j] * dr[mu,nu,j]
-    phase = 2 * np.pi * np.einsum("kj,mnj->kmn", K_scaled, dr)
-    return np.exp(1j * phase)                       # [n_k, n_sl, n_sl]
-
-
-def apply_phases(corr, corr_lookup, sl_positions, k_dims, n_ssf):
-    """Contract raw correlators with sublattice phase factors.
-
-    Returns dict label -> array of shape [n_T, k0, k1, k2], real-valued,
-    normalised by n_ssf.
-    """
-    w = compute_phase_factors(k_dims, sl_positions)  # [n_k, n_sl, n_sl]
-
-    # contracted[c, t, k] = Re Σ_{mu,nu} w[k,mu,nu] * corr[c,t,k,mu,nu]
-    contracted = np.real(
-        np.einsum("kmn,ctkmn->ctk", w, corr)
-    )  # [n_corr, n_T, n_k]
-
-    contracted /= n_ssf[np.newaxis, :, np.newaxis] 
+    contracted = np.real(corr)                       # [n_corr, n_T, n_k]
+    contracted = contracted / n_ssf[np.newaxis, :, np.newaxis]
 
     k0, k1, k2 = k_dims
     contracted = contracted.reshape(len(corr_lookup), -1, k0, k1, k2)
@@ -157,7 +136,7 @@ def plot_ssf(ax, file, args, title=""):
         sys.exit(f"--t-index must be in [0, {n_T - 1}]")
     t_val = ssf_T[t_idx]
 
-    S = apply_phases(corr, corr_lookup, sl_positions, k_dims, n_ssf)
+    S = normalize_ssf(corr, corr_lookup, k_dims, n_ssf)
 
     # Build derived observables from whatever components are present
     diag = [c for c in ("xx", "yy", "zz") if c in S]
@@ -175,7 +154,7 @@ def plot_ssf(ax, file, args, title=""):
     ax.set_title(title, fontsize=6)
 
     data = np.fft.fftshift(data_3d[t_idx][idx])
-    data /= (16 * k_dims[0]*k_dims[1]*k_dims[2])
+    data /= n_spins
 
     vmax = 10**args.vmax
     if args.vmin:

@@ -39,13 +39,20 @@ struct CorrSpec {
 };
 
 
-// Measures a user-specified set of sublattice-resolved spin component correlators.
+// Measures a user-specified set of spin component correlators, phase-folded
+// over sublattice indices into a scalar S(q) per k-point.
 //
 // Accumulates, per temperature and per requested (α,β) pair:
 //
-//   C^{αβ}_{μν}(q) = Σ_samples  conj(Ã_μ^α(q)) · Ã_ν^β(q)
+//   S^{αβ}(q) = Σ_samples  Σ_{μ,ν} w_{μν}(q) · conj(Ã_μ^α(q)) · Ã_ν^β(q)
+//
+// where w_{μν}(q) = exp(+i q·(r_μ−r_ν)) is the sublattice structure-factor
+// phase (SublatWeightMatrix::phase_factors).  The contraction over (μ,ν) is
+// performed here, in C++, so the on-disk array is a factor of n_sl^2 smaller
+// than storing the full sublattice-resolved correlator.
+//
 //   and the error term,
-//   sq_C^{αβ}_{μν}(q) = Σ_samples  |conj(Ã_μ^α(q)) · Ã_ν^β(q)|^2 entrywise as real and imaginary parts
+//   sq_S^{αβ}(q) = Σ_samples  |S^{αβ}(q)|^2 entrywise as real and imaginary parts
 //
 // Only one temperature's accumulators are held in memory at once.
 //
@@ -63,8 +70,8 @@ struct CorrSpec {
 //       ssf.write_group(file_id, "/ssf");   // metadata only
 //
 // HDF5 output layout (write_group):
-//   static_corr  [n_corr, n_T, n_k, n_sl, n_sl, 2]  — last dim = re/im
-//   static_corr_2  [n_corr, n_T, n_k, n_sl, n_sl, 2]
+//   static_corr  [n_corr, n_T, n_k, 2]  — last dim = re/im (sublattice-contracted)
+//   static_corr_2  [n_corr, n_T, n_k, 2]
 //   corr_lookup  [n_corr]                             — VL strings, e.g. "xx", "xz"
 //   T_list       [n_T]                                — temperatures, sorted ascending
 //   n_samples    [n_T]
@@ -79,9 +86,17 @@ class ssf_manager : public abstract_manager {
 
     std::vector<CorrSpec> corr_specs_;
 
-    // One temperature's accumulators. Freed by flush() in streaming mode.
-    std::vector<FourierCorrelator<CMC::HeisenbergSpin>> curr_corr_;
-    std::vector<FourierCorrelator<CMC::HeisenbergSpin>> curr_corr_sq_;
+    // Sublattice structure-factor phase weights w_{μν}(q) = exp(+i q·(r_μ−r_ν)),
+    // built once from the lattice + sublattice positions.  Used to contract each
+    // sample's FourierCorrelator into a scalar S(q) before accumulation.
+    std::optional<SublatWeightMatrix> phase_w_;
+
+    // One temperature's phase-folded accumulators, indexed [corr][k].
+    // Freed by flush() in streaming mode.
+    //   curr_S_[c][k]    = Σ_samples S^{αβ}_c(q_k)
+    //   curr_S_sq_[c][k] = Σ_samples |S^{αβ}_c(q_k)|^2  (re²/im² entrywise)
+    std::vector<std::vector<std::complex<double>>> curr_S_;
+    std::vector<std::vector<std::complex<double>>> curr_S_sq_;
 
     int n_sl_;
     int n_kpoints_;
@@ -100,46 +115,40 @@ class ssf_manager : public abstract_manager {
     std::vector<double> T_sorted_;
 
     void alloc_curr_T() {
-        curr_corr_.clear();
-        curr_corr_sq_.clear();
-        for (size_t c = 0; c < corr_specs_.size(); ++c) {
-            curr_corr_.emplace_back(n_sl_, k_dims_);
-            if (store_error_term_)
-                curr_corr_sq_.emplace_back(n_sl_, k_dims_);
-        }
+        const size_t nk = static_cast<size_t>(n_kpoints_);
+        curr_S_.assign(corr_specs_.size(),
+                       std::vector<std::complex<double>>(nk, 0.0));
+        if (store_error_term_)
+            curr_S_sq_.assign(corr_specs_.size(),
+                              std::vector<std::complex<double>>(nk, 0.0));
+        else
+            curr_S_sq_.clear();
     }
 
     void on_new_temp() override {
         alloc_curr_T();
     }
 
-    // Flatten curr_corr_ (and curr_corr_sq_) into contiguous double buffers.
-    // Layout: [n_corr, n_k, n_sl, n_sl, 2]  (matches one T-slice of the HDF5 dataset).
+    // Flatten curr_S_ (and curr_S_sq_) into contiguous double buffers.
+    // Layout: [n_corr, n_k, 2]  (matches one T-slice of the HDF5 dataset).
     void flatten_current(std::vector<double>& buf,
                          std::vector<double>& sq_buf) const {
         const size_t nc = corr_specs_.size();
         const size_t nk = static_cast<size_t>(n_kpoints_);
-        const size_t ns = static_cast<size_t>(n_sl_);
-        const size_t n_elem = nc * nk * ns * ns * 2;
+        const size_t n_elem = nc * nk * 2;
         buf.resize(n_elem);
         if (store_error_term_) sq_buf.resize(n_elem);
 
         for (size_t c = 0; c < nc; ++c)
-            for (size_t mu = 0; mu < ns; ++mu)
-                for (size_t nu = 0; nu < ns; ++nu)
-                    for (size_t k = 0; k < nk; ++k) {
-                        const size_t base = ((c * nk + k) * ns + mu) * ns + nu;
-                        const auto val = curr_corr_[c](
-                            static_cast<int>(mu), static_cast<int>(nu))[k];
-                        buf[base * 2]     = val.real();
-                        buf[base * 2 + 1] = val.imag();
-                        if (store_error_term_) {
-                            const auto sq_val = curr_corr_sq_[c](
-                                static_cast<int>(mu), static_cast<int>(nu))[k];
-                            sq_buf[base * 2]     = sq_val.real();
-                            sq_buf[base * 2 + 1] = sq_val.imag();
-                        }
-                    }
+            for (size_t k = 0; k < nk; ++k) {
+                const size_t base = c * nk + k;
+                buf[base * 2]     = curr_S_[c][k].real();
+                buf[base * 2 + 1] = curr_S_[c][k].imag();
+                if (store_error_term_) {
+                    sq_buf[base * 2]     = curr_S_sq_[c][k].real();
+                    sq_buf[base * 2 + 1] = curr_S_sq_[c][k].imag();
+                }
+            }
     }
 
     // Write metadata (corr_lookup, T_list, n_samples, sl_positions, attributes)
@@ -158,11 +167,12 @@ public:
           n_kpoints_(sc.lattice.num_primitive_cells()),
           n_spins_(static_cast<int>(sc.get_objects<CMC::HeisenbergSpin>().size())),
           k_dims_(sc.lattice.size()),
-          sl_positions_(
-              std::get<SlPos<CMC::HeisenbergSpin>>(sc.sl_positions).begin(),
-              std::get<SlPos<CMC::HeisenbergSpin>>(sc.sl_positions).end()),
           store_error_term_(store_error_term)
     {
+        for (const auto& slp : std::get<SlPos<CMC::HeisenbergSpin>>(sc.sl_positions)){
+            sl_positions_.push_back(slp);
+        }
+
         auto axis_idx = [](char c) -> int {
             if (c == 'x') return 0;
             if (c == 'y') return 1;
@@ -184,12 +194,18 @@ public:
         if (need[0]) ft_x_.emplace(sc);
         if (need[1]) ft_y_.emplace(sc);
         if (need[2]) ft_z_.emplace(sc);
+
+        // Precompute sublattice phase weights once for the sample() contraction.
+        phase_w_.emplace(
+            SublatWeightMatrix::phase_factors(sc.lattice, sl_positions_));
     }
 
     // Streaming constructor — for anneal.cpp.
     // Creates the HDF5 group and pre-allocates static_corr / static_corr_2 on
     // disk immediately, then flush() writes one temperature at a time so only
-    // O(n_sl^2 * n_k) memory is held per temperature instead of O(n_T * n_sl^2 * n_k).
+    // O(n_corr * n_k) memory is held per temperature instead of O(n_T * n_corr * n_k).
+    // Sublattice indices are contracted away in sample(), so neither memory nor
+    // disk carries the n_sl^2 factor.
     //
     // Pre-allocation with H5D_ALLOC_TIME_EARLY reserves the full file extent at
     // creation, so subsequent flush() calls write in-place without growing the
@@ -229,20 +245,21 @@ public:
     const std::vector<ipos_t>& get_sl_positions() const { return sl_positions_; }
 
     // Serialise current temperature's data into flat double arrays for MPI (temper.cpp).
-    // Layout: [n_corr, n_k, n_sl, n_sl, 2].  t_idx must equal curr_idx.
+    // Layout: [n_corr, n_k, 2].  t_idx must equal curr_idx.
     void get_flat_buffer(size_t t_idx,
                          std::vector<double>& corr_buf,
                          std::vector<double>& corr_sq_buf) const {
         assert(t_idx == curr_idx);
         (void)t_idx;
-        assert(!curr_corr_.empty());
+        assert(!curr_S_.empty());
         flatten_current(corr_buf, corr_sq_buf);
     }
 
-    // Fourier-transform the current spin configuration and accumulate C^{αβ}_{μν}(q).
+    // Fourier-transform the current spin configuration, fold in the sublattice
+    // phases, and accumulate the scalar S(q).
     void sample() {
         assert(!T_list.empty());
-        assert(!curr_corr_.empty() && "sample() called after flush() without new_T()");
+        assert(!curr_S_.empty() && "sample() called after flush() without new_T()");
 
         if (ft_x_) ft_x_->transform();
         if (ft_y_) ft_y_->transform();
@@ -254,17 +271,21 @@ public:
             return ft_z_->get_buffer();
         };
 
+        const size_t nk = static_cast<size_t>(n_kpoints_);
         for (size_t c = 0; c < corr_specs_.size(); ++c) {
+            // C_{μν}(q) = conj(Ã_μ^α) Ã_ν^β, then contract to S(q) = Σ_{μν} w_{μν} C_{μν}.
             auto this_corr = correlate(buf(corr_specs_[c].alpha),
                     buf(corr_specs_[c].beta));
-            curr_corr_[c] += this_corr;
+            const auto S_k = phase_w_->contract(this_corr);  // [n_k]
 
-            if (store_error_term_){
-                for (int i=0; i<n_sl_; i++)
-                    for (int j=0; j<n_sl_; j++)
-                        for (auto& C_k : this_corr(i,j))
-                            C_k = {C_k.real()*C_k.real(), C_k.imag()*C_k.imag()};
-                curr_corr_sq_[c] += this_corr;
+            for (size_t k = 0; k < nk; ++k)
+                curr_S_[c][k] += S_k[k];
+
+            if (store_error_term_) {
+                for (size_t k = 0; k < nk; ++k)
+                    curr_S_sq_[c][k] += std::complex<double>(
+                        S_k[k].real() * S_k[k].real(),
+                        S_k[k].imag() * S_k[k].imag());
             }
         }
 
@@ -330,6 +351,10 @@ inline ssf_manager::ssf_manager(CMC::Lattice& sc,
     if (need[1]) ft_y_.emplace(sc);
     if (need[2]) ft_z_.emplace(sc);
 
+    // Precompute sublattice phase weights once for the sample() contraction.
+    phase_w_.emplace(
+        SublatWeightMatrix::phase_factors(sc.lattice, sl_positions_));
+
     T_sorted_ = T_sample;
     std::sort(T_sorted_.begin(), T_sorted_.end());
 
@@ -347,15 +372,14 @@ inline ssf_manager::ssf_manager(CMC::Lattice& sc,
         throw std::runtime_error(
             std::string("ssf_manager: failed to open/create group ") + group_name);
 
-    // Pre-allocate static_corr[n_corr, n_T, n_k, n_sl, n_sl, 2].
+    // Pre-allocate static_corr[n_corr, n_T, n_k, 2].
     // H5D_ALLOC_TIME_EARLY reserves the full file extent at dataset creation so
     // flush() writes are purely in-place — no file growth during the MC run.
     const hsize_t nc = corr_specs_.size();
     const hsize_t nk = static_cast<hsize_t>(n_kpoints_);
-    const hsize_t ns = static_cast<hsize_t>(n_sl_);
-    const hsize_t dims[6] = { nc, static_cast<hsize_t>(n_T), nk, ns, ns, 2 };
+    const hsize_t dims[4] = { nc, static_cast<hsize_t>(n_T), nk, 2 };
 
-    hid_t fspace = H5Screate_simple(6, dims, nullptr);
+    hid_t fspace = H5Screate_simple(4, dims, nullptr);
     hid_t dcpl   = H5Pcreate(H5P_DATASET_CREATE);
     H5Pset_layout(dcpl, H5D_CONTIGUOUS);
     H5Pset_alloc_time(dcpl, H5D_ALLOC_TIME_EARLY);
@@ -389,7 +413,7 @@ inline ssf_manager::ssf_manager(CMC::Lattice& sc,
 inline void ssf_manager::flush() {
     assert(streaming_mode_ && "flush() called on non-streaming ssf_manager");
     assert(!T_list.empty());
-    assert(!curr_corr_.empty() && "flush() called with no accumulated data");
+    assert(!curr_S_.empty() && "flush() called with no accumulated data");
 
     // Map current temperature to its pre-sorted slot in the dataset.
     const double curr_T = T_list[curr_idx];
@@ -401,17 +425,16 @@ inline void ssf_manager::flush() {
 
     const hsize_t nc = static_cast<hsize_t>(corr_specs_.size());
     const hsize_t nk = static_cast<hsize_t>(n_kpoints_);
-    const hsize_t ns = static_cast<hsize_t>(n_sl_);
 
-    // Flatten [n_corr, n_k, n_sl, n_sl, 2]
+    // Flatten [n_corr, n_k, 2]
     std::vector<double> buf, sq_buf;
     flatten_current(buf, sq_buf);
 
     // Write one T-slice via hyperslab.
-    // Each flush is nc * nk * ns^2 * 2 * 8 bytes — large sequential I/O on Lustre.
-    const hsize_t start[6] = { 0, slot, 0, 0, 0, 0 };
-    const hsize_t count[6] = { nc, 1,    nk, ns, ns, 2 };
-    const hsize_t mem_dims  = nc * nk * ns * ns * 2;
+    // Each flush is nc * nk * 2 * 8 bytes — large sequential I/O on Lustre.
+    const hsize_t start[4] = { 0, slot, 0, 0 };
+    const hsize_t count[4] = { nc, 1,    nk, 2 };
+    const hsize_t mem_dims  = nc * nk * 2;
     hid_t mem_sp  = H5Screate_simple(1, &mem_dims, nullptr);
 
     hid_t file_sp = H5Dget_space(sum_ds_);
@@ -434,11 +457,11 @@ inline void ssf_manager::flush() {
     if (rc < 0)
         throw std::runtime_error("ssf_manager::flush: H5Dwrite failed");
 
-    // Release correlator memory; on_new_temp() will reallocate for the next T.
-    curr_corr_.clear();
-    curr_corr_.shrink_to_fit();
-    curr_corr_sq_.clear();
-    curr_corr_sq_.shrink_to_fit();
+    // Release accumulator memory; on_new_temp() will reallocate for the next T.
+    curr_S_.clear();
+    curr_S_.shrink_to_fit();
+    curr_S_sq_.clear();
+    curr_S_sq_.shrink_to_fit();
 }
 
 
@@ -540,7 +563,7 @@ inline void ssf_manager::write_metadata(hid_t grp) const {
 inline void ssf_manager::write_group(hid_t file_id, const char* group_name) {
     if (streaming_mode_) {
         // Flush any temperature that wasn't flushed explicitly.
-        if (!curr_corr_.empty() && !T_list.empty())
+        if (!curr_S_.empty() && !T_list.empty())
             flush();
 
         // Write metadata to the already-open group.
@@ -556,7 +579,6 @@ inline void ssf_manager::write_group(hid_t file_id, const char* group_name) {
     // Non-streaming mode: create everything now and write current temperature's data.
     const size_t  n_T    = T_list.size();
     const size_t  n_corr = corr_specs_.size();
-    const hsize_t ns     = static_cast<hsize_t>(n_sl_);
     const hsize_t nk     = static_cast<hsize_t>(n_kpoints_);
 
     hid_t grp;
@@ -569,11 +591,11 @@ inline void ssf_manager::write_group(hid_t file_id, const char* group_name) {
         throw std::runtime_error(
             std::string("ssf_manager: failed to open/create group ") + group_name);
 
-    // Dataset shape: [n_corr, n_T, n_k, n_sl, n_sl, 2]
-    const hsize_t dims[6] = { static_cast<hsize_t>(n_corr),
+    // Dataset shape: [n_corr, n_T, n_k, 2]
+    const hsize_t dims[4] = { static_cast<hsize_t>(n_corr),
                                static_cast<hsize_t>(n_T),
-                               nk, ns, ns, 2 };
-    hid_t fspace = H5Screate_simple(6, dims, nullptr);
+                               nk, 2 };
+    hid_t fspace = H5Screate_simple(4, dims, nullptr);
 
     hid_t sum_ds = H5Dcreate2(grp, "static_corr", H5T_NATIVE_DOUBLE, fspace,
                                H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
@@ -588,13 +610,13 @@ inline void ssf_manager::write_group(hid_t file_id, const char* group_name) {
             "ssf_manager: failed to create static_corr or static_corr_2");
     }
 
-    // Write curr_corr_ into slot curr_idx of the dataset.
+    // Write curr_S_ into slot curr_idx of the dataset.
     std::vector<double> buf, sq_buf;
     flatten_current(buf, sq_buf);
 
-    const hsize_t start[6] = { 0, static_cast<hsize_t>(curr_idx), 0, 0, 0, 0 };
-    const hsize_t count[6] = { static_cast<hsize_t>(n_corr), 1, nk, ns, ns, 2 };
-    const hsize_t mem_dims  = static_cast<hsize_t>(n_corr) * nk * ns * ns * 2;
+    const hsize_t start[4] = { 0, static_cast<hsize_t>(curr_idx), 0, 0 };
+    const hsize_t count[4] = { static_cast<hsize_t>(n_corr), 1, nk,  2 };
+    const hsize_t mem_dims  = static_cast<hsize_t>(n_corr) * nk *  2;
     hid_t mem_sp = H5Screate_simple(1, &mem_dims, nullptr);
 
     hid_t file_sp = H5Dget_space(sum_ds);

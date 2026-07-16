@@ -192,10 +192,7 @@ namespace CMC {
         } else {
             // S (anti-)aligned with h_loc: any tangent direction is equivalent.
             vector3::vec3d perp(normal_dist(rng), normal_dist(rng), normal_dist(rng));
-            perp -= dot(perp, spin->S) * spin->S;
-            double pn2 = dot(perp, perp);
-            if (pn2 > 1e-20)
-                rotate_about_vector(new_S, perp, spin->lifted_dir * delta);
+            spin->S += perp;
         }
         new_S /= norm(new_S); // numerical safety
 
