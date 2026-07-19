@@ -95,7 +95,6 @@ def main():
                         "intra as a faint wide band behind the solid inter-seed bars")
     p.add_argument("--vmin", type=float, default=None)
     p.add_argument("--vmax", type=float, default=None)
-    p.add_argument("--override_slpos", action="store_true")
     p.add_argument("-o", "--output", default=None,
                    help="Save figure to file instead of displaying")
     args = p.parse_args()
@@ -159,13 +158,6 @@ def main():
         (_, _, _, _, _, _,
          corr, corr_lookup, sl_positions, k_dims, n_spins, ssf_T, n_ssf) = load_file(fpath)
 
-        if args.override_slpos:
-            sl_positions = np.array([[0,0,0],[0,0,0],[0,0,0],[0,0,0],
-                                     [0,4,4],[0,4,4],[0,4,4],[0,4,4],
-                                     [4,0,4],[4,0,4],[4,0,4],[4,0,4],
-                                     [4,4,0],[4,4,0],[4,4,0],[4,4,0]
-                                     ])
-
 
         n_T = corr.shape[1]
         if not temp_mode:
@@ -176,7 +168,7 @@ def main():
         else:
             t_indices = range(n_T)
 
-        S = apply_phases(corr, corr_lookup, sl_positions, k_dims, n_ssf)
+        S = normalize_ssf(corr, corr_lookup, k_dims, n_ssf)
         diag = [c for c in ("xx", "yy", "zz") if c in S]
         if not diag:
             print(f"Warning: no diagonal correlators in {os.path.basename(fpath)}, skipping",
@@ -184,19 +176,13 @@ def main():
             continue
 
         var_inter, var_intra, n_seeds = load_ssf_variance(fpath)
-        S_inter = (contract_corr2(var_inter, corr_lookup, sl_positions, k_dims)
-                   if var_inter is not None else None)
-        S_intra = (contract_corr2(var_intra, corr_lookup, sl_positions, k_dims)
-                   if var_intra is not None else None)
+        # S_inter = (contract_corr2(var_inter, corr_lookup, sl_positions, k_dims)
+        #            if var_inter is not None else None)
+        # S_intra = (contract_corr2(var_intra, corr_lookup, sl_positions, k_dims)
+        #            if var_intra is not None else None)
+        S_inter = None
+        S_intra=None
 
-        # Legacy fallback for merges predating var_inter/var_intra.
-        S2 = None
-        if S_inter is None:
-            corr_2, n_seeds_legacy = load_corr2(fpath)
-            if corr_2 is not None:
-                S2 = contract_corr2(corr_2, corr_lookup, sl_positions, k_dims)
-                if n_seeds is None:
-                    n_seeds = n_seeds_legacy
 
         # Qz is in units of 2π/a_cubic; k_dims[i] = L for cubic supercell
         qi = qz_to_idx(qz, k_dims[0])
@@ -212,7 +198,7 @@ def main():
         for t_idx in t_indices:
             x_val = ssf_T[t_idx] if temp_mode else x_val  # noqa: F821 (x_val set above for non-temp)
             series_data[ser]['x'].append(x_val)
-            n_per_seed = n_ssf[t_idx] / n_seeds if n_seeds else np.nan
+            # n_per_seed = n_ssf[t_idx] / n_seeds if n_seeds else np.nan
             for panel, (i0, i1, i2) in enumerate(q_indices):
                 intensity = sum(S[c][t_idx, i0, i1, i2] for c in diag) / n_spins
                 series_data[ser]['I'][panel].append(intensity)
@@ -220,9 +206,9 @@ def main():
                 if S_inter is not None and n_seeds is not None:
                     W_inter = sum(S_inter[c][t_idx, i0, i1, i2] for c in diag)
                     se_inter = se_from_inter(W_inter, n_seeds, n_spins)
-                elif S2 is not None and n_seeds is not None:
-                    W_q = sum(S2[c][t_idx, i0, i1, i2] for c in diag)
-                    se_inter = cross_seed_se(W_q, intensity, n_seeds, n_ssf[t_idx], n_spins)
+                # elif S2 is not None and n_seeds is not None:
+                #     W_q = sum(S2[c][t_idx, i0, i1, i2] for c in diag)
+                #     se_inter = cross_seed_se(W_q, intensity, n_seeds, n_ssf[t_idx], n_spins)
                 else:
                     se_inter = np.nan
 

@@ -41,15 +41,16 @@ import h5py
 #   recip_vectors
 #
 # Datasets in /ssf:
-#   static_corr      — Σ_seeds raw sum of per-sample correlators [n_corr,n_T,n_k,n_sl,n_sl,2]
+#   static_corr      — Σ_seeds raw sum of per-sample correlators [n_corr,n_T,n_k,2]
 #   static_corr_2    — Σ_seeds (per-seed raw sum)²  [same shape]  ← inter-seed 2nd moment
 #   n_samples        — total sample count across seeds [n_T]
-#   var_inter        — inter-seed variance of C_{μν}(k): Var_seeds[mean_C_seed] [same shape]
-#   var_intra        — sum of per-seed intrinsic variances of C_{μν}(k) [same shape]
+#   var_inter        — inter-seed variance of C(k): Var_seeds[mean_C_seed] [same shape]
+#   var_intra        — sum of per-seed intrinsic variances of C(k) [same shape]
 #                      (absent if no seed file contained static_corr_2)
 #   T_list, corr_lookup, sl_positions, attrs — copied from first file
 #
-# Last dim of all corr arrays is [Re, Im], storing Re and Im variances separately.
+# Sublattice contraction is done in C++ (ssf_manager), so on-disk corr arrays are
+# [n_corr, n_T, n_k, 2]; the last dim is [Re, Im], stored independently.
 #
 # Heat capacity per spin: C/N = var * N_prim / (T² * N_spins)
 #                              = var / (T² * 16)
@@ -240,11 +241,11 @@ def merge_group(fnames):
 
     # SSF variance terms.
     # Assumes uniform n_per_seed across seeds; n_per_seed[t] = total_samp[t] / K.
-    # Both var arrays have shape [n_corr, n_T, n_k, n_sl, n_sl, 2] where the last
-    # dimension stores [Re variance, Im variance] independently.
+    # Both var arrays have shape [n_corr, n_T, n_k, 2] where the last dimension
+    # stores [Re variance, Im variance] independently.
     n_per_seed = total_static_samp / K   # [n_T]
-    # broadcast over [n_corr, n_T, n_k, n_sl, n_sl, 2]
-    n_ = n_per_seed[np.newaxis, :, np.newaxis, np.newaxis, np.newaxis, np.newaxis]
+    # broadcast over [n_corr, n_T, n_k, 2]
+    n_ = n_per_seed[np.newaxis, :, np.newaxis, np.newaxis]
 
     # Inter-seed variance: Var_seeds[mean_C_seed]
     #   = (1/K) Σ_s (C_s/n)² − ((1/K) Σ_s C_s/n)²
