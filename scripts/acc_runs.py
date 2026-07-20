@@ -158,13 +158,23 @@ def merged_name(representative_file, n_seeds):
     return os.path.join(os.path.dirname(representative_file), out)
 
 
-def merge_group(fnames):
+def merge_group(fnames_raw):
     """Merge one group of seed-repeated run files into a single .avg.h5.
     Returns the output path."""
     T_ref    = None
     E_total  = None
     E2_total = None
     n_total  = None
+
+    # purge any corrupt files
+    fnames = []
+    for f in fnames_raw:
+        try: 
+            _ = load_energy_raw(f)
+            fnames.append(f)
+        except Exception as e:
+            print(f"Failed to process {f}: {e}")
+
 
     # accumulate the energies
     for fname in fnames:

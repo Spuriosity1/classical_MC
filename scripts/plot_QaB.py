@@ -180,8 +180,8 @@ def main():
         #            if var_inter is not None else None)
         # S_intra = (contract_corr2(var_intra, corr_lookup, sl_positions, k_dims)
         #            if var_intra is not None else None)
-        S_inter = None
-        S_intra=None
+        S_inter = var_inter
+        S_intra= var_intra
 
 
         # Qz is in units of 2π/a_cubic; k_dims[i] = L for cubic supercell
@@ -198,7 +198,7 @@ def main():
         for t_idx in t_indices:
             x_val = ssf_T[t_idx] if temp_mode else x_val  # noqa: F821 (x_val set above for non-temp)
             series_data[ser]['x'].append(x_val)
-            # n_per_seed = n_ssf[t_idx] / n_seeds if n_seeds else np.nan
+            n_per_seed = n_ssf[t_idx] / n_seeds if n_seeds else np.nan
             for panel, (i0, i1, i2) in enumerate(q_indices):
                 intensity = sum(S[c][t_idx, i0, i1, i2] for c in diag) / n_spins
                 series_data[ser]['I'][panel].append(intensity)

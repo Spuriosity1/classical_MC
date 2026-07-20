@@ -64,10 +64,6 @@ struct CouplingSpec {
     std::string name;
     std::vector<std::vector<ipos_t>> relative_vectors;
     vector3::mat33<double> J;
-    // If true, bonds_above/bonds_below are split by pyro_sl ordering (lower
-    // pyro_sl → bonds_above) rather than pointer ordering. Required for
-    // non-symmetric J matrices (e.g. local-frame XXZ).
-    bool use_pyro_sl_ordering = false;
 };
 
 struct MC_parameters {
@@ -113,8 +109,8 @@ public:
 
     void define_coupling(const std::string& name,
             const std::vector<std::vector<ipos_t>>& rel_vecs,
-            const vector3::mat33<double>& J,
-            bool use_pyro_sl_ordering = false);
+            const vector3::mat33<double>& J
+            );
 
     void set_global_field(const vector3::vec3<double>& h);
     vector3::vec3d get_global_field() const;

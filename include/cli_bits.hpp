@@ -181,7 +181,7 @@ inline auto build_J1J2J3_h(const argparse::ArgumentParser& prog, CMC::Lattice& l
             mat33d Ising = mat33d::from_cols(
                 v2a(z_mu[0] * z_nu), v2a(z_mu[1] * z_nu), v2a(z_mu[2] * z_nu));
             std::string pname = "J1_" + std::to_string(mu) + std::to_string(nu);
-            mc.define_coupling(pname, *nn1_pairs[k], J1*(Delta-1) * Ising + J1*coupling::Heis, /*use_pyro_sl_ordering=*/true);
+            mc.define_coupling(pname, *nn1_pairs[k], J1*(Delta-1) * Ising + J1*coupling::Heis);
         }                                            
     }                                                
     mc.define_coupling("J2", pyrochlore::nn2_dist, J2*coupling::Heis);
