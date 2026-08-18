@@ -49,6 +49,10 @@ int main (int argc, char *argv[]) {
         .implicit_value(true)
         .default_value(false);
 
+    prog.add_argument("--save_state_ft")
+        .implicit_value(true)
+        .default_value(false);
+
     prog.add_argument("--init_spiral")
         .help("Pre-initialise spins to a spiral with the wavevector given by --Q (requires --Q)")
         .implicit_value(true)
@@ -170,7 +174,12 @@ int main (int argc, char *argv[]) {
     if (file_id < 0)
         throw std::runtime_error("Failed to create HDF5 file: " + file_path.string());
 
-    ssf_manager ssfm(lat, {"xx", "yy", "zz"}, file_id, "/ssf", T_sample, true);
+    // Full symmetric spin-correlation matrix: the three diagonal components give
+    // the Heisenberg trace <S.S>(q); the three off-diagonals carry the spiral-plane
+    // tensor (real part) and the vector chirality (imaginary part), from which the
+    // O(3)-invariant plane observables are reconstructed in postprocessing.
+    ssf_manager ssfm(lat, {"xx", "yy", "zz", "xy", "xz", "yz"},
+                     file_id, "/ssf", T_sample, true);
 
     const bool use_lifted = prog.get<bool>("--lifted");
     auto sweep = [&](double T_) -> size_t {
@@ -222,11 +231,17 @@ int main (int argc, char *argv[]) {
     write_geometry_group(file_id, lat);
     H5Fclose(file_id);
     std::cout<<"Saved to \n"<< file_path<<std::endl;
+
+    if (prog.get<bool>("--save_state_ft")){
+        auto f = outdir /( name.str() + ".spindft.h5" );
+        printf("Saving Fourier transformed spin state to %s\n", f.string().c_str());
+        save_spin_state(lat, f);
+    }
     
     if (prog.get<bool>("--save_state")){
         auto f = outdir /( name.str() + ".spins.h5" );
         printf("Saving spin state to %s\n", f.string().c_str());
-        save_spin_state(lat, f);
+        save_ft_spin_state(lat, f);
     }
 
     return 0;

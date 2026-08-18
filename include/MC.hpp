@@ -18,16 +18,26 @@
 namespace CMC {
 
 using json=nlohmann::json;
+using dmat33_t = vector3::mat33<double>;
 
 
 struct HeisenbergSpin;
 
 /**
- * @brief Collection of neighboring spins connected by a given bond shell.
+ * @brief A group of neighbours of one spin that all share the same coupling
+ * matrix orientation.
+ *
+ * `J` points into the owning CouplingSpec (either its `J` or its transpose
+ * `Jt`). The field contribution of this shell to its owner spin is
+ * `*J * sum(bonds->S)`. A spin that is the *source* (lower pyro_sl) of a bond
+ * points at `J`; the *target* (higher pyro_sl) points at `Jt`. A pointer (not a
+ * reference) is used so BondShell stays copy-assignable, as build_supercell
+ * requires of HeisenbergSpin. The pointee stays valid because `coupling_specs`
+ * is never resized after setup_lattice().
  */
-struct NeighbourSpins {
-    std::vector<HeisenbergSpin*> bonds_above;
-    std::vector<HeisenbergSpin*> bonds_below;
+struct BondShell {
+    const dmat33_t* J;
+    std::vector<HeisenbergSpin*> bonds;
 };
 
 
@@ -36,15 +46,14 @@ struct NeighbourSpins {
  *
  * Satisfies the GeometricObject concept via the `ipos` member.
  *
- * Bond orientation convention:
- *  - bonds_above: neighbor pointer < this pointer
- *  - bonds_below: neighbor pointer >= this pointer
+ * `bond_shells` holds this spin's neighbours grouped by which oriented coupling
+ * matrix applies (see BondShell); local_field sums J*neighbours over shells.
  */
 struct HeisenbergSpin {
     ipos_t ipos;                           // required by GeometricObject concept
     int pyro_sl = 0;                       // pyrochlore sublattice 0–3
     vector3::vec3<double> S;
-    std::vector<NeighbourSpins> bond_sets;
+    std::vector<BondShell> bond_shells;
     int8_t lifted_dir = 1;                 // ±1; used by sweep_lifted_Metropolis, ignored otherwise
 };
 
@@ -63,7 +72,8 @@ typedef Supercell<HeisenbergSpin> Lattice;
 struct CouplingSpec {
     std::string name;
     std::vector<std::vector<ipos_t>> relative_vectors;
-    vector3::mat33<double> J;
+    dmat33_t J;    // applied by the source (lower-pyro_sl) endpoint of a bond
+    dmat33_t Jt;   // = J.tr(); applied by the target (higher-pyro_sl) endpoint
 };
 
 struct MC_parameters {
@@ -122,8 +132,8 @@ public:
 
     void overrelax_all();
     void overrelax_some(double p);
-    size_t sweep_local_Metropolis(double T);
-    size_t sweep_lifted_Metropolis(double T);
+    size_t sweep_local_Metropolis(double T, size_t n_overrelax);
+    size_t sweep_lifted_Metropolis(double T, size_t n_overrelax);
 };
 
 
@@ -139,7 +149,8 @@ public:
 
 
 
-void save_spin_state(const Lattice& lat, const std::filesystem::path& file_path);
+void save_spin_state(Lattice& lat, const std::filesystem::path& file_path);
+void save_ft_spin_state(Lattice& lat, const std::filesystem::path& file_path);
 
 
 }

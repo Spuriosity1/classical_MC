@@ -64,7 +64,7 @@ def se_from_intra(W_intra, n_seeds, n_per_seed, n_spins):
     """Standard error contribution to the multi-seed mean SSF from
     within-run (intra-seed) sampling noise.
 
-    W_intra    : var_intra[k_q], summed over diagonal components —
+    W_intra    : var_intra[k_q], summed over diagonal components -
                  Σ_seeds Var[single MC sample of S(q) | seed].
     n_per_seed : MC samples per seed at this temperature (= n_ssf_t / K).
 
@@ -74,6 +74,17 @@ def se_from_intra(W_intra, n_seeds, n_per_seed, n_spins):
     if n_seeds is None or n_seeds < 1 or not n_per_seed or n_per_seed <= 0:
         return np.nan
     return np.sqrt(max(float(W_intra), 0.0) / (n_seeds**2 * n_per_seed)) / n_spins
+
+def filter_corrupted(files: list):
+    clean = []
+    for f in files:
+        try:
+            with h5py.File(f) as fp:
+                clean.append(f)
+        except Exception as e:
+            print(f"File {f} corrupt: {e}")
+    return clean
+
 
 
 def main():
@@ -99,7 +110,10 @@ def main():
                    help="Save figure to file instead of displaying")
     args = p.parse_args()
 
-    files = args.file
+    files = filter_corrupted(args.file)
+    
+
+
     fixed, _, all_params = split_fixed_varying(files)
 
     temp_mode = args.x_axis is None
@@ -116,10 +130,12 @@ def main():
     fig, axes = plt.subplots(2, 2, figsize=(10, 8))
     ax_flat = [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]]
 
+    # First three panels hold the Bragg peaks ranked (per file) by intensity,
+    # not fixed directions; Gamma is pinned to the last panel.
     panel_labels = [
-        r"$(0,0,Q_z)$  [Bragg]",
-        r"$(Q_z,0,0)$",
-        r"$(0,Q_z,0)$",
+        r"highest $S(\mathbf{q})$",
+        r"2nd highest",
+        r"3rd highest",
         r"$\Gamma = (0,0,0)$",
     ]
     for ax, title in zip(ax_flat, panel_labels):
@@ -176,10 +192,7 @@ def main():
             continue
 
         var_inter, var_intra, n_seeds = load_ssf_variance(fpath)
-        # S_inter = (contract_corr2(var_inter, corr_lookup, sl_positions, k_dims)
-        #            if var_inter is not None else None)
-        # S_intra = (contract_corr2(var_intra, corr_lookup, sl_positions, k_dims)
-        #            if var_intra is not None else None)
+
         S_inter = var_inter
         S_intra= var_intra
 
@@ -195,11 +208,23 @@ def main():
         ]
 
         ser = get_series(params)
+
+        # Rank this file's three Bragg peaks by intensity so panel 0 always
+        # shows the dominant peak for this seed, panel 1 the next, etc. Gamma
+        # (q-point index 3) is pinned to the last panel. The ordering is fixed
+        # per file (evaluated at the reference/coldest temperature) so a given
+        # q-point stays in the same panel across the x-axis.
+        ref_t = (n_T - 1) if temp_mode else t_indices[0]
+        ref_I = [sum(S[c][ref_t, i0, i1, i2] for c in diag)
+                 for (i0, i1, i2) in q_indices[:3]]
+        perm = list(np.argsort(ref_I)[::-1]) + [3]  # perm[panel] -> q-point index
+
         for t_idx in t_indices:
             x_val = ssf_T[t_idx] if temp_mode else x_val  # noqa: F821 (x_val set above for non-temp)
             series_data[ser]['x'].append(x_val)
             n_per_seed = n_ssf[t_idx] / n_seeds if n_seeds else np.nan
-            for panel, (i0, i1, i2) in enumerate(q_indices):
+            for panel in range(len(q_indices)):
+                i0, i1, i2 = q_indices[perm[panel]]
                 intensity = sum(S[c][t_idx, i0, i1, i2] for c in diag) / n_spins
                 series_data[ser]['I'][panel].append(intensity)
 
@@ -248,16 +273,19 @@ def main():
             if args.err_source == "both" and np.any(np.isfinite(SEa_sorted)):
                 # faint wide band behind the main bars shows intra-seed spread
                 ax.errorbar(x_sorted, I_sorted, yerr=np.nan_to_num(SEa_sorted),
-                            fmt='none', ecolor=color, alpha=0.3,
+                            lw=0,
+                            fmt='o', ecolor=color, alpha=0.3,
+                            
                             elinewidth=5, capsize=0, zorder=1)
                 se_main = SEi_sorted
 
             if np.any(np.isfinite(se_main)):
                 ax.errorbar(x_sorted, I_sorted, yerr=se_main,
-                            fmt='o-', label=label, color=color, ms=4,
+                            fmt='o', label=label, color=color, ms=4,
+                            lw=0,
                             capsize=3, elinewidth=1, zorder=2)
             else:
-                ax.plot(x_sorted, I_sorted, 'o-', label=label, color=color, ms=4, zorder=2)
+                ax.plot(x_sorted, I_sorted, 'o', alpha=0.1, label=label, color=color, ms=4, zorder=2)
         plotted_any = True
 
     if not plotted_any:

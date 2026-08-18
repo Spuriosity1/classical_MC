@@ -156,10 +156,13 @@ inline auto build_J1J2J3_h(const argparse::ArgumentParser& prog, CMC::Lattice& l
 
     CMC::MC_runner mc(lat, hash_true_random(seed));
 
-    // J1 as six sublattice-pair specs for local-frame XXZ.
-    // For pair (mu, nu) with mu < nu, J_spec = J1 * [I + (Delta-1) * z_nu ⊗ z_mu].
-    // bonds_above/bonds_below are split by pyro_sl order so J_spec is applied
-    // consistently: h_nu += J_spec * S_mu,  h_mu += J_spec^T * S_nu.
+    // J1 as six sublattice-pair specs for local-frame XXZ: exactly the six
+    // nn1 bonds of one tetrahedron, declared once each (de-duplicated).
+    // For pair (mu, nu) with mu < nu, the source-applied matrix is
+    //   J_spec = J1 * [I + (Delta-1) * z_mu ⊗ z_nu],
+    // so the lower-sublattice (source) field is h_mu += J_spec * S_nu, giving the
+    // bond energy J1[ S_mu·S_nu + (Delta-1)(S_mu·z_mu)(S_nu·z_nu) ]. The target
+    // (nu) endpoint references J_spec^T (stored as CouplingSpec::Jt).
     {
         using vec3d = vector3::vec3<double>;
         static const std::pair<int,int> pairs[6] =
@@ -172,18 +175,17 @@ inline auto build_J1J2J3_h(const argparse::ArgumentParser& prog, CMC::Lattice& l
             auto [mu, nu] = pairs[k];
             const vec3d& z_mu = pyrochlore::axis[mu][2];
             const vec3d& z_nu = pyrochlore::axis[nu][2];
-            // J_spec = J1*I + J1*(Delta-1)*(z_nu ⊗ z_mu)
-            // column j of (z_nu ⊗ z_mu) is z_mu[j]*z_nu
+            // (z_mu ⊗ z_nu)_{ab} = z_mu[a]*z_nu[b]; column b is z_nu[b]*z_mu.
             // mat33d::from_cols takes std::array<double,3>, so convert explicitly
             auto v2a = [](vec3d v) -> std::array<double,3> {
                 return {v[0], v[1], v[2]};
             };
             mat33d Ising = mat33d::from_cols(
-                v2a(z_mu[0] * z_nu), v2a(z_mu[1] * z_nu), v2a(z_mu[2] * z_nu));
+                v2a(z_nu[0] * z_mu), v2a(z_nu[1] * z_mu), v2a(z_nu[2] * z_mu));
             std::string pname = "J1_" + std::to_string(mu) + std::to_string(nu);
             mc.define_coupling(pname, *nn1_pairs[k], J1*(Delta-1) * Ising + J1*coupling::Heis);
-        }                                            
-    }                                                
+        }
+    }
     mc.define_coupling("J2", pyrochlore::nn2_dist, J2*coupling::Heis);
     mc.define_coupling("J3a", pyrochlore::nn3a_dist, J3*coupling::Heis);
     mc.define_coupling("J3b", pyrochlore::nn3b_dist, J3*coupling::Heis);

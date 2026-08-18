@@ -1,5 +1,6 @@
 #include "MC.hpp"
 #include "H5Gpublic.h"
+#include "ssf_manager.hpp"
 #include <random>
 #include <cmath>
 
@@ -12,40 +13,39 @@ namespace CMC {
 
 
     void MC_runner::setup_lattice(){
-        // int coup_idx = 0;
+        auto& spins = lat->get_objects<HeisenbergSpin>();
+        const int Np = lat->lattice.num_primitive_cells();
+        const int num_sl = static_cast<int>(
+            std::get<SlPos<HeisenbergSpin>>(lat->sl_positions).size());
+
+        // For each coupling, split each spin's neighbours into two BondShells:
+        // those where the spin is the source (lower pyro_sl -> apply J) and
+        // those where it is the target (higher pyro_sl -> apply J^T). The two
+        // directed halves of a bond thus reference J and Jt respectively, so
+        // the undirected bond energy S_mu^T J S_nu is well-defined without any
+        // runtime transpose. Equal pyro_sl only occurs for symmetric couplings
+        // (J == Jt), so it is grouped with the source side.
         for (const auto& c : coupling_specs){
-            // std::cout << "Coupling Index " << coup_idx++ << " -> linking\n";
-
-            auto& spins = lat->get_objects<HeisenbergSpin>();
-            const int Np = lat->lattice.num_primitive_cells();
-            const int num_sl = static_cast<int>(
-                std::get<SlPos<HeisenbergSpin>>(lat->sl_positions).size());
-
             for (int sl = 0; sl < num_sl; sl++) {
-                // pyrochlore sublattice 0-3 determined by position within FCC site
-                const int pyro_sl = sl % 4;
-
+                const int pyro_sl = sl % 4;  // pyrochlore sublattice within FCC site
                 for (int cell = 0; cell < Np; cell++) {
-                    HeisenbergSpin* link = &spins[sl * Np + cell];
+                    HeisenbergSpin* origin = &spins[sl * Np + cell];
 
-                    std::vector<HeisenbergSpin*> shell_above;
-                    std::vector<HeisenbergSpin*> shell_below;
-
+                    std::vector<HeisenbergSpin*> src_bonds;  // origin is source -> J
+                    std::vector<HeisenbergSpin*> tgt_bonds;  // origin is target -> Jt
                     for (const auto& v : c.relative_vectors.at(pyro_sl)) {
                         HeisenbergSpin* other =
-                            lat->get_object_at<HeisenbergSpin>(link->ipos + v);
-                        
-                        // order by pyro SL ordering; tie-break by pointer ordering
-                        bool above = (other->pyro_sl != link->pyro_sl) ?
-                            (other->pyro_sl < link->pyro_sl) : other < link;
-
-                        if (above) {
-                            shell_above.push_back(other);
-                        } else {
-                            shell_below.push_back(other);
-                        }
+                            lat->get_object_at<HeisenbergSpin>(origin->ipos + v);
+                        if (origin->pyro_sl <= other->pyro_sl)
+                            src_bonds.push_back(other);
+                        else
+                            tgt_bonds.push_back(other);
                     }
-                    link->bond_sets.push_back({shell_above, shell_below});
+
+                    if (!src_bonds.empty())
+                        origin->bond_shells.push_back({&c.J,  std::move(src_bonds)});
+                    if (!tgt_bonds.empty())
+                        origin->bond_shells.push_back({&c.Jt, std::move(tgt_bonds)});
                 }
             }
         }
@@ -62,7 +62,7 @@ namespace CMC {
         }
 
         index[name] = coupling_specs.size();
-        coupling_specs.push_back({name, rel_vecs, J});
+        coupling_specs.push_back({name, rel_vecs, J, J.tr()});
     }
 
 
@@ -87,16 +87,10 @@ namespace CMC {
     vector3::vec3d MC_runner::local_field(const HeisenbergSpin *spin) const
     {
         vector3::vec3d h_loc{0,0,0};
-        vector3::vec3d tmp;
-        assert(coupling_specs.size() == spin->bond_sets.size());
-        for (size_t cpl_idx = 0; cpl_idx < coupling_specs.size(); cpl_idx++) {
-            auto J = coupling_specs[cpl_idx].J;
-            tmp = {0,0,0};
-            accumulate_field(tmp, spin->bond_sets[cpl_idx].bonds_above);
-            h_loc += J * tmp;
-            tmp = {0,0,0};
-            accumulate_field(tmp, spin->bond_sets[cpl_idx].bonds_below);
-            h_loc += tmp * J;
+        for (const auto& shell : spin->bond_shells) {
+            vector3::vec3d tmp{0,0,0};
+            accumulate_field(tmp, shell.bonds);
+            h_loc += *shell.J * tmp;
         }
         return h_loc;
     }
@@ -158,12 +152,13 @@ namespace CMC {
         }
     }
 
-    size_t MC_runner::sweep_local_Metropolis(double T){
+    size_t MC_runner::sweep_local_Metropolis(double T, size_t n_overrelax=1){
         size_t accepted = 0;
         for (auto& spin : lat->get_objects<HeisenbergSpin>()){
             accepted += local_Metropolis(T, &spin);
         }
-        overrelax_all();
+        for (size_t i=0; i<n_overrelax; i++)
+            overrelax_all();
         return accepted;
     }
 
@@ -233,8 +228,58 @@ namespace CMC {
         lat = &new_lat;
     }
 
+    void save_ft_spin_state(Lattice& lat, const std::filesystem::path& file_path){
+        hid_t file = H5Fcreate(file_path.string().c_str(),
+                H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
 
-    void save_spin_state(const Lattice& lat, const std::filesystem::path& file_path){
+            // Sublattice-resolved DFT of the spin field, one component at a time.
+            // Stored as the raw per-cell transform Ã_μ^raw(K) WITHOUT the
+            // sublattice phase exp(-i q·r_μ) — matching the ssf_manager
+            // convention; the phase is applied in post-processing.
+            FT_Sx_t tf_x(lat);
+            FT_Sy_t tf_y(lat);
+            FT_Sz_t tf_z(lat);
+
+            tf_x.transform();
+            tf_y.transform();
+            tf_z.transform();
+
+            const FourierBuffer<HeisenbergSpin>* bufs[3] = {
+                &tf_x.get_buffer(), &tf_y.get_buffer(), &tf_z.get_buffer()};
+
+            const int num_sl = bufs[0]->num_sublattices;
+            const ivec3_t kd = bufs[0]->k_dims;
+            const size_t n_k = static_cast<size_t>(kd[0]) * kd[1] * kd[2];
+
+            // Layout: [component (x,y,z), sublattice, k-index, {re, im}]
+            std::vector<double> ft(3 * num_sl * n_k * 2);
+            for (int c = 0; c < 3; c++) {
+                const auto& buf = *bufs[c];
+                for (int sl = 0; sl < num_sl; sl++) {
+                    for (size_t k = 0; k < n_k; k++) {
+                        const size_t base =
+                            ((static_cast<size_t>(c) * num_sl + sl) * n_k + k) * 2;
+                        ft[base]     = buf[sl][k].real();
+                        ft[base + 1] = buf[sl][k].imag();
+                    }
+                }
+            }
+
+            hsize_t ft_dims[4] = {3, static_cast<hsize_t>(num_sl),
+                                  static_cast<hsize_t>(n_k), 2};
+            hid_t ft_space = H5Screate_simple(4, ft_dims, NULL);
+            hid_t ft_dset = H5Dcreate(file, "spin_ft", H5T_IEEE_F64LE, ft_space,
+                                      H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+            H5Dwrite(ft_dset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT,
+                     ft.data());
+            H5Dclose(ft_dset);
+            H5Sclose(ft_space);
+        
+        H5Fclose(file);
+    }
+
+
+    void save_spin_state(Lattice& lat, const std::filesystem::path& file_path){
         const auto& spins = std::get<std::vector<HeisenbergSpin>>(lat.objects);
         const size_t N = spins.size();
 
@@ -266,8 +311,8 @@ namespace CMC {
         H5Dwrite(dset_ori, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT,
                  ori.data());
         H5Dclose(dset_ori);
-
         H5Sclose(space);
+
         H5Fclose(file);
     }
 

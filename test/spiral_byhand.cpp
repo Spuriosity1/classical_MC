@@ -40,7 +40,7 @@ int main (int argc, char *argv[]) {
 
     prog.add_argument("--J1")
         .help("Nearest-neighbour Heisenberg coupling strength")
-        .required()
+        .default_value(-1.)
         .scan<'g', double>();
     prog.add_argument("--J2")
         .help("Second-nearest-neighbour Heisenberg coupling strength")

@@ -100,6 +100,73 @@ def load_ssf_raw(fname):
 
     return T, corr_lookup, n_samples, sl_pos, static_corr, static_corr_2, attrs
 
+def plane_invariants(static_corr, n_samp, corr_lookup):
+    """Reconstruct O(3)-invariant spiral-plane observables from one seed's
+    full spin-correlation matrix.
+
+    The spiral plane is a spontaneously broken O(3) direction: any quantity
+    linear in it (off-diagonal correlators, the traceless tensor, the chirality
+    vector) averages to isotropy across seeds. The invariants below are scalar
+    under global spin rotation, so they are computed *per seed* here — where the
+    plane is a fixed single domain — and only then averaged across seeds by the
+    caller. Averaging the raw correlators first (as done for the trace) destroys
+    this information.
+
+    Requires the six components xx,yy,zz,xy,xz,yz (Hermitian at each q).
+    Returns None if any are missing (old 3-correlator files).
+
+    For the coherent order at the ordering wavevector Q, per seed:
+        M(Q) ∝ (1 - n n^T) + i (chirality), n = spiral-plane normal.
+      symmetric real part  M_S = M - trace/3 → traceless tensor T
+      antisymmetric imag   M_A → vector chirality κ_c = ε_{abc} Im M^{ab}
+
+    Observables (both in [-1, 1] / [0, 1], scale-free, so directly comparable):
+      w        = 3√6 det(T) / Tr(T²)^{3/2}
+                 +1 collinear (prolate), −1 coplanar spiral (oblate), 0 isotropic
+      chi_frac = |κ| / Tr(M_S)
+                 net vector chirality: 1 for a perfect proper-screw helix, 0 collinear
+    Also returns the trace tr = <S.S>(q) for intensity masking downstream.
+    All arrays have shape [n_T, n_k].
+    """
+    labels = [s.decode() if isinstance(s, bytes) else s for s in corr_lookup]
+    need = ("xx", "yy", "zz", "xy", "xz", "yz")
+    if not set(need).issubset(labels):
+        return None
+    idx = {l: i for i, l in enumerate(labels)}
+
+    C = static_corr[..., 0] + 1j * static_corr[..., 1]   # [n_corr, n_T, n_k]
+    M = C / n_samp[np.newaxis, :, np.newaxis]             # per-seed thermal average
+    def g(l):
+        return M[idx[l]]
+
+    # Symmetric (real) part → spiral-plane tensor.
+    Mxx, Myy, Mzz = g("xx").real, g("yy").real, g("zz").real
+    Mxy, Mxz, Myz = g("xy").real, g("xz").real, g("yz").real
+    tr = Mxx + Myy + Mzz
+    t = tr / 3.0
+    Txx, Tyy, Tzz = Mxx - t, Myy - t, Mzz - t
+    Txy, Txz, Tyz = Mxy, Mxz, Myz
+
+    I2 = Txx**2 + Tyy**2 + Tzz**2 + 2.0 * (Txy**2 + Txz**2 + Tyz**2)
+    detT = (Txx * (Tyy * Tzz - Tyz**2)
+            - Txy * (Txy * Tzz - Tyz * Txz)
+            + Txz * (Txy * Tyz - Tyy * Txz))
+
+    # Shape parameter w ∈ [-1, 1]. A per-T floor on the denominator suppresses
+    # the 0/0 noise away from ordering peaks without touching the peak value.
+    floor = 1e-6 * np.max(I2, axis=-1, keepdims=True) ** 1.5
+    w = 3.0 * np.sqrt(6.0) * detT / np.maximum(I2**1.5, floor)
+    w = np.clip(w, -1.0, 1.0)
+
+    # Antisymmetric (imag) part → vector chirality. Only |κ| is used (its sign is
+    # the spontaneously chosen handedness), so ε-signs are irrelevant here.
+    kappa2 = 4.0 * (g("yz").imag**2 + g("xz").imag**2 + g("xy").imag**2)
+    tr_floor = 1e-6 * np.max(tr, axis=-1, keepdims=True) + 1e-30
+    chi_frac = np.clip(np.sqrt(kappa2) / np.maximum(tr, tr_floor), 0.0, 1.0)
+
+    return {"w": w, "chi_frac": chi_frac, "tr": tr}
+
+
 # key=value segments in run filenames. Keys are normally a single
 # identifier word ("L", "J1", "Tc", ...), but "spiral_axis" is the one
 # multi-word exception emitted by cli_bits.hpp, so it's special-cased here.

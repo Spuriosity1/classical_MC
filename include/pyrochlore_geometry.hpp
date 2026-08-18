@@ -52,7 +52,6 @@ inline UnitCellSpecifier<CMC::HeisenbergSpin> PrimitiveCell() {
 
 
 namespace pyrochlore {
-
     using idx3_t = ipos_t;
 
 static const idx3_t pyro[4] = {
