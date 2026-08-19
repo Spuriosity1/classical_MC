@@ -25,7 +25,7 @@ static const mat33d Isin = mat33d::from_cols(
 };
 
 
-inline auto declare_LJ123(argparse::ArgumentParser& prog){
+inline auto provide_physical_args(argparse::ArgumentParser& prog){
 
     /// PHYSICAL
     prog.add_argument("L")
@@ -43,6 +43,15 @@ inline auto declare_LJ123(argparse::ArgumentParser& prog){
         .help("Third-nearest-neighbour Heisenberg coupling strength (mutually exclusive with --Q)")
         .default_value(0.)
         .scan<'g', double>();
+    prog.add_argument("--K")
+        .help("Biquadratic interaction strength")
+        .default_value(0.)
+        .scan<'g', double>();
+    // prog.add_argument("--D")
+    //     .help("Dipolar interaction strength")
+    //     .default_value(0.)
+    //     .scan<'g', double>();
+    
     prog.add_argument("--Q")
         .help("Nonzero spiral wavevector component in units of 2pi/a_cubic; J3 is set to minimise spiral energy "
               "(mutually exclusive with --J3). Rounded to nearest supercell-commensurate value.")

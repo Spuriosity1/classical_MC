@@ -88,7 +88,7 @@ int main(int argc, char* argv[])
     prog.add_argument("--output_dir", "-o")
         .help("Path to output directory");
 
-    declare_LJ123(prog);
+    provide_physical_args(prog);
 
     try {
         prog.parse_args(argc, argv);

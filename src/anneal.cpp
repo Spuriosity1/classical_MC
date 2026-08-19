@@ -99,7 +99,7 @@ int main (int argc, char *argv[]) {
         .implicit_value(true)
         .default_value(false);
 
-    declare_LJ123(prog);
+    provide_physical_args(prog);
 
     try {
         prog.parse_args(argc, argv);

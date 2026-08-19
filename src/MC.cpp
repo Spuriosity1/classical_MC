@@ -152,7 +152,7 @@ namespace CMC {
         }
     }
 
-    size_t MC_runner::sweep_local_Metropolis(double T, size_t n_overrelax=1){
+    size_t MC_runner::sweep_local_Metropolis(double T, size_t n_overrelax){
         size_t accepted = 0;
         for (auto& spin : lat->get_objects<HeisenbergSpin>()){
             accepted += local_Metropolis(T, &spin);
@@ -165,12 +165,32 @@ namespace CMC {
     // Lifted Metropolis step for a single spin.
     //
     // Proposes a rotation of S by (lifted_dir * delta) radians around the axis
-    // S × h_loc, which lies in the plane containing S and h_loc.  This means
-    // lifted_dir = +1 rotates S toward the local-field direction (energy-
-    // decreasing) and lifted_dir = -1 rotates away.  On rejection the direction
-    // is flipped instead of staying put, eliminating the diffusive back-and-forth
-    // of standard Metropolis while preserving the correct stationary distribution
-    // via skewed detailed balance.
+    // S × h_loc. This slides S along the meridian of the sphere whose pole is
+    // ĥ_loc, i.e. it changes only ψ = angle(S, h_loc) (cos ψ = S·ĥ_loc) and
+    // leaves the azimuth fixed. On rejection the lifting direction is flipped
+    // instead of staying put, suppressing the diffusive back-and-forth of
+    // standard Metropolis while keeping π ∝ exp(-E/T) stationary via skewed
+    // detailed balance.
+    //
+    // The meridian shift ψ → ψ + δ is NOT measure-preserving: the uniform sphere
+    // measure is sinψ dψ dφ, so the map carries a Jacobian sinψ_new / sinψ_old
+    // that MUST multiply the Boltzmann factor in the acceptance ratio. Since
+    // |S × h_loc| = |h_loc| sinψ and |h_loc| is fixed during the move, that
+    // Jacobian is just the ratio of the rotation-axis lengths. Dropping it (as a
+    // naive Metropolis test would) turns this update into a persistent descent
+    // toward the field direction and systematically over-cools the system.
+    //
+    // Skewed detailed balance additionally requires the reverse move to be the
+    // exact inverse of the forward one: g_{-ε}(g_ε(S)) = S. That holds only while
+    // ψ ± δ stays inside (0, π). The rotation axis is a(S) = S × h_loc =
+    // |h_loc| sinψ n̂ with n̂ the fixed normal of the (S, h_loc) plane; when a move
+    // carries ψ through a pole (0 or π) the sign of sinψ flips, so a(S_new) points
+    // OPPOSITE to a(S) and the -ε rotation no longer undoes the move. Rotating
+    // straight through the pole therefore breaks the involution and injects a net
+    // probability current (an O(δ) bias that over-cools the lattice). We instead
+    // treat each pole as a reflecting wall: a proposal that would cross it is
+    // rejected and the lifting direction flipped (a "bounce"), leaving S put. The
+    // crossing is detected by the axis flipping orientation, dot(a(S),a(S_new))<0.
     size_t MC_runner::local_lifted_Metropolis(double T, HeisenbergSpin* spin)
     {
         auto h_loc = local_field(spin) - global_field;
@@ -181,21 +201,40 @@ namespace CMC {
         // Rotation axis perpendicular to S in the S–h_loc plane.
         // rotate_about_vector handles unnormalised axes, and dot(axis, S) = 0
         // (cross product ⊥ both factors), so the Rodriguez term in S vanishes.
+        // |axis|² = |h_loc|² sin²ψ_old.
         auto axis = cross(spin->S, h_loc);
-        double axis_n2 = dot(axis, axis);
+        double axis_n2_old = dot(axis, axis);
+
+        // Poles (S ∥ ±h_loc): the meridian is undefined and the Jacobian is
+        // singular. This is a measure-zero configuration, so treat it as a
+        // rejection — flip the lifting direction and wait for the neighbourhood
+        // (hence h_loc) to move S off the pole on a later sweep.
+        if (axis_n2_old <= 1e-20) {
+            spin->lifted_dir = -spin->lifted_dir;
+            return 0;
+        }
 
         auto new_S = spin->S;
-        if (axis_n2 > 1e-20) {
-            rotate_about_vector(new_S, axis, spin->lifted_dir * delta);
-        } else {
-            // S (anti-)aligned with h_loc: any tangent direction is equivalent.
-            vector3::vec3d perp(normal_dist(rng), normal_dist(rng), normal_dist(rng));
-            spin->S += perp;
-        }
+        rotate_about_vector(new_S, axis, spin->lifted_dir * delta);
         new_S /= norm(new_S); // numerical safety
 
+        // |axis_new|² = |h_loc|² sin²ψ_new, so sqrt(new/old) = sinψ_new/sinψ_old.
+        auto axis_new = cross(new_S, h_loc);
+        double axis_n2_new = dot(axis_new, axis_new);
+
+        // Reflecting bounce: if the move crossed a pole the rotation axis flipped
+        // orientation, so the reverse move would not invert it and skewed detailed
+        // balance is broken. Reject, flip the lifting direction, and leave S put.
+        if (dot(axis, axis_new) < 0) {
+            spin->lifted_dir = -spin->lifted_dir;
+            return 0;
+        }
+
         double dE = dot(new_S, h_loc) - curr_E;
-        if (dE < 0 || rand01(rng) < exp(-dE / T)) {
+        // Skewed-detailed-balance acceptance min(1, [sinψ_new/sinψ_old]·e^{-ΔE/T}).
+        // rand01 < (ratio ≥ 1) is always true, so no explicit clamp is needed.
+        double accept_ratio = sqrt(axis_n2_new / axis_n2_old) * exp(-dE / T);
+        if (rand01(rng) < accept_ratio) {
             spin->S = new_S;
             return 1;
         }
@@ -204,12 +243,14 @@ namespace CMC {
         return 0;
     }
 
-    size_t MC_runner::sweep_lifted_Metropolis(double T){
+    size_t MC_runner::sweep_lifted_Metropolis(double T, size_t n_overrelax){
         size_t accepted = 0;
         for (auto& spin : lat->get_objects<HeisenbergSpin>()){
             accepted += local_lifted_Metropolis(T, &spin);
         }
-        overrelax_all();
+        for (size_t n=0; n<n_overrelax; n++)
+            overrelax_all();
+
         return accepted;
     }
 

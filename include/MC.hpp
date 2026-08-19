@@ -132,8 +132,8 @@ public:
 
     void overrelax_all();
     void overrelax_some(double p);
-    size_t sweep_local_Metropolis(double T, size_t n_overrelax);
-    size_t sweep_lifted_Metropolis(double T, size_t n_overrelax);
+    size_t sweep_local_Metropolis(double T, size_t n_overrelax=1);
+    size_t sweep_lifted_Metropolis(double T, size_t n_overrelax=1);
 };
 
 

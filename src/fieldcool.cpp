@@ -85,7 +85,7 @@ int main (int argc, char *argv[]) {
     prog.add_argument("--prefix")
         .default_value("run");
 
-    declare_LJ123(prog);
+    provide_physical_args(prog);
 
     try {
         prog.parse_args(argc, argv);
