@@ -94,6 +94,7 @@ class MC_runner {
 
     std::uniform_int_distribution<size_t> site_dist;
     std::normal_distribution<double> normal_dist;
+    std::exponential_distribution<double> exp_dist;
     std::uniform_real_distribution<double> rand01;
 
     XoshiroCpp::Xoroshiro128PlusPlus rng;
@@ -129,11 +130,13 @@ public:
 
     size_t local_Metropolis(double T, HeisenbergSpin* spin);
     size_t local_lifted_Metropolis(double T, HeisenbergSpin* spin);
+    size_t local_lifted_Metropolis_rot(double T, HeisenbergSpin* spin);
 
     void overrelax_all();
     void overrelax_some(double p);
     size_t sweep_local_Metropolis(double T, size_t n_overrelax=1);
     size_t sweep_lifted_Metropolis(double T, size_t n_overrelax=1);
+    size_t sweep_lifted_Metropolis_rot(double T, size_t n_overrelax=1);
 };
 
 

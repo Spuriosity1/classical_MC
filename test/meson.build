@@ -18,3 +18,13 @@ bench_lifted_bin = executable('bench_lifted',
   )
 
 test('lifted MC consistency', bench_lifted_bin)
+
+
+
+bench_speed_bin = executable('bench_speed',
+  files('bench_speed.cpp'),
+  dependencies: g_deps,
+  link_with: mc_lib,
+  include_directories: CMC_inc,
+  install: false
+  )

@@ -162,7 +162,7 @@ namespace CMC {
         return accepted;
     }
 
-    // Lifted Metropolis step for a single spin.
+    // Lifted Metropolis step for a single spin (rotation formulation).
     //
     // Proposes a rotation of S by (lifted_dir * delta) radians around the axis
     // S × h_loc. This slides S along the meridian of the sphere whose pole is
@@ -191,7 +191,7 @@ namespace CMC {
     // treat each pole as a reflecting wall: a proposal that would cross it is
     // rejected and the lifting direction flipped (a "bounce"), leaving S put. The
     // crossing is detected by the axis flipping orientation, dot(a(S),a(S_new))<0.
-    size_t MC_runner::local_lifted_Metropolis(double T, HeisenbergSpin* spin)
+    size_t MC_runner::local_lifted_Metropolis_rot(double T, HeisenbergSpin* spin)
     {
         auto h_loc = local_field(spin) - global_field;
         double curr_E = dot(spin->S, h_loc);
@@ -243,10 +243,58 @@ namespace CMC {
         return 0;
     }
 
+    // Lifted Metropolis algorithm.
+    // Propose S-> S + delta*h,
+    // where delta has the sign of lifted_dir
+    size_t MC_runner::local_lifted_Metropolis(double T, HeisenbergSpin* spin){
+        auto h_loc = local_field(spin) - global_field;
+        double curr_E = dot(spin->S, h_loc);
+
+        auto h_loc_hat = h_loc;
+        h_loc_hat /= norm(h_loc);
+        double u = dot(h_loc_hat, spin->S);
+
+
+        double du =  spin->lifted_dir * sqrt(T / settings.T_ref) * exp_dist(rng);
+
+        double new_u = u+du;
+
+        // ensure that we did not move off the sphere
+        if (new_u > 1 || new_u < -1 || abs(1-u*u) < 1e-16){
+            spin->lifted_dir = -spin->lifted_dir;
+            return 0;
+        }
+
+        auto new_S = new_u * h_loc_hat + sqrt( (1-new_u*new_u)/ (1-u*u) ) * (spin->S - u*h_loc_hat);
+        new_S /= norm(new_S);
+
+        double dE = dot(new_S, h_loc) - curr_E;
+
+        double accept_ratio =  exp(-dE / T);
+        if (rand01(rng) < accept_ratio) {
+            spin->S = new_S;
+            return 1;
+        }
+
+        spin->lifted_dir = -spin->lifted_dir;
+        return 0;
+    }
+
     size_t MC_runner::sweep_lifted_Metropolis(double T, size_t n_overrelax){
         size_t accepted = 0;
         for (auto& spin : lat->get_objects<HeisenbergSpin>()){
             accepted += local_lifted_Metropolis(T, &spin);
+        }
+        for (size_t n=0; n<n_overrelax; n++)
+            overrelax_all();
+
+        return accepted;
+    }
+
+    size_t MC_runner::sweep_lifted_Metropolis_rot(double T, size_t n_overrelax){
+        size_t accepted = 0;
+        for (auto& spin : lat->get_objects<HeisenbergSpin>()){
+            accepted += local_lifted_Metropolis_rot(T, &spin);
         }
         for (size_t n=0; n<n_overrelax; n++)
             overrelax_all();
