@@ -61,8 +61,8 @@ void randomise_spins(Lattice& lat, std::mt19937_64& rng) {
 MC_runner make_runner(Lattice& lat, double J1, double J2, double T_ref,
                       uint64_t seed) {
     MC_runner mc(lat, seed);
-    mc.define_coupling("J1", j1_dist, J1 * Heis);
-    mc.define_coupling("J2", j2_dist, J2 * Heis);
+    mc.define_general_coupling("J1", j1_dist, J1 * Heis);
+    mc.define_general_coupling("J2", j2_dist, J2 * Heis);
     mc.settings.T_ref = T_ref;
     mc.setup_lattice();
     return mc;

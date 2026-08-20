@@ -192,12 +192,19 @@ inline auto build_J1J2J3_h(const argparse::ArgumentParser& prog, CMC::Lattice& l
             mat33d Ising = mat33d::from_cols(
                 v2a(z_nu[0] * z_mu), v2a(z_nu[1] * z_mu), v2a(z_nu[2] * z_mu));
             std::string pname = "J1_" + std::to_string(mu) + std::to_string(nu);
-            mc.define_coupling(pname, *nn1_pairs[k], J1*(Delta-1) * Ising + J1*coupling::Heis);
+            mc.define_general_coupling(pname, *nn1_pairs[k], J1*(Delta-1) * Ising + J1*coupling::Heis);
         }
     }
-    mc.define_coupling("J2", pyrochlore::nn2_dist, J2*coupling::Heis);
-    mc.define_coupling("J3a", pyrochlore::nn3a_dist, J3*coupling::Heis);
-    mc.define_coupling("J3b", pyrochlore::nn3b_dist, J3*coupling::Heis);
+    mc.define_Heisenberg_coupling("J2", pyrochlore::nn2_dist, J2);
+    mc.define_Heisenberg_coupling("J3a", pyrochlore::nn3a_dist, J3);
+    mc.define_Heisenberg_coupling("J3b", pyrochlore::nn3b_dist, J3);
+
+    // Nearest-neighbour biquadratic K/2 (S_i·S_j)^2. Only registered when
+    // nonzero so pure-linear runs keep biquad_bonds empty (zero overhead).
+    auto K = prog.get<double>("--K");
+    if (K != 0)
+        mc.define_biquad_coupling("K", pyrochlore::nn1_dist, K);
+
     mc.set_global_field(global_field);
 
     mc.settings.T_ref = prog.get<double>("--T_ref");

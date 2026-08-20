@@ -3,12 +3,30 @@
 #include "ssf_manager.hpp"
 #include <random>
 #include <cmath>
+#include <algorithm>
 
 namespace CMC {
 
 
+    double norm(const vector3::vec3d& v){
+        return sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+    }
+
+    void mirror_about_vector(vector3::vec3d& v, const vector3::vec3d& axis){
+        v = -v + 2 *(dot(axis, v) / (dot(axis, axis) + 1e-10) ) * axis;
+    }
+
     vector3::vec3d cross(const vector3::vec3d& a, const vector3::vec3d& b){
         return {a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]};
+    }
+
+    void rotate_about_vector(vector3::vec3d& v, const vector3::vec3d& axis, double theta){
+        // generates a random vector with fixed projection onto axis
+        double c = std::cos(theta);
+        double s = std::sin(theta);
+        double norm2 = dot(axis, axis);
+        // Rodruigez formula
+        v = c * v + ((1-c)/norm2) * dot(axis, v) * axis + (s / sqrt(norm2)) * cross(axis, v);
     }
 
 
@@ -25,7 +43,7 @@ namespace CMC {
         // the undirected bond energy S_mu^T J S_nu is well-defined without any
         // runtime transpose. Equal pyro_sl only occurs for symmetric couplings
         // (J == Jt), so it is grouped with the source side.
-        for (const auto& c : coupling_specs){
+        for (const auto& c : general_coupling_specs){
             for (int sl = 0; sl < num_sl; sl++) {
                 const int pyro_sl = sl % 4;  // pyrochlore sublattice within FCC site
                 for (int cell = 0; cell < Np; cell++) {
@@ -43,9 +61,43 @@ namespace CMC {
                     }
 
                     if (!src_bonds.empty())
-                        origin->bond_shells.push_back({&c.J,  std::move(src_bonds)});
+                        origin->general_bonds.push_back({&c.J,  std::move(src_bonds)});
                     if (!tgt_bonds.empty())
-                        origin->bond_shells.push_back({&c.Jt, std::move(tgt_bonds)});
+                        origin->general_bonds.push_back({&c.Jt, std::move(tgt_bonds)});
+                }
+            }
+        }
+
+        // Heisenberg and biquadratic couplings are symmetric scalars, so there
+        // is no source/target (J vs J^T) distinction: every neighbour goes into
+        // a single shell. Each undirected bond is still stored at both endpoints;
+        // per-site energy differences count it once, total_energy applies 0.5.
+        for (const auto& c : heis_coupling_specs){
+            for (int sl = 0; sl < num_sl; sl++) {
+                const int pyro_sl = sl % 4;
+                for (int cell = 0; cell < Np; cell++) {
+                    HeisenbergSpin* origin = &spins[sl * Np + cell];
+                    std::vector<HeisenbergSpin*> bonds;
+                    for (const auto& v : c.relative_vectors.at(pyro_sl))
+                        bonds.push_back(
+                            lat->get_object_at<HeisenbergSpin>(origin->ipos + v));
+                    if (!bonds.empty())
+                        origin->heis_bonds.push_back({&c.J, std::move(bonds)});
+                }
+            }
+        }
+
+        for (const auto& c : biquad_coupling_specs){
+            for (int sl = 0; sl < num_sl; sl++) {
+                const int pyro_sl = sl % 4;
+                for (int cell = 0; cell < Np; cell++) {
+                    HeisenbergSpin* origin = &spins[sl * Np + cell];
+                    std::vector<HeisenbergSpin*> bonds;
+                    for (const auto& v : c.relative_vectors.at(pyro_sl))
+                        bonds.push_back(
+                            lat->get_object_at<HeisenbergSpin>(origin->ipos + v));
+                    if (!bonds.empty())
+                        origin->biquad_bonds.push_back({&c.K, std::move(bonds)});
                 }
             }
         }
@@ -53,16 +105,54 @@ namespace CMC {
 
 
 
-    void MC_runner::define_coupling(const std::string& name,
+    void MC_runner::randomize_spins(){
+        for (auto& s : lat->get_objects<HeisenbergSpin>()){
+            vector3::vec3d v{normal_dist(rng), normal_dist(rng), normal_dist(rng)};
+            double n = norm(v);
+            // Re-draw the measure-zero all-zero Gaussian sample so 1/n is finite.
+            while (n < 1e-12) {
+                v = vector3::vec3d{normal_dist(rng), normal_dist(rng), normal_dist(rng)};
+                n = norm(v);
+            }
+            v /= n;
+            s.S = v;
+        }
+    }
+
+
+    void MC_runner::define_general_coupling(const std::string& name,
             const std::vector<std::vector<ipos_t>>& rel_vecs,
             const vector3::mat33<double>& J)
     {
-        if (index.contains(name)){
+        if (index.contains(name))
             throw std::logic_error("Coupling names must be unique");
-        }
 
-        index[name] = coupling_specs.size();
-        coupling_specs.push_back({name, rel_vecs, J, J.tr()});
+        index[name] = index_entry_t(0, general_coupling_specs.size());
+        general_coupling_specs.push_back({name, rel_vecs, J, J.tr()});
+    }
+
+
+    void MC_runner::define_Heisenberg_coupling(const std::string& name,
+            const std::vector<std::vector<ipos_t>>& rel_vecs,
+            const double J
+            ){
+        if (index.contains(name))
+            throw std::logic_error("Coupling names must be unique");
+
+        index[name] = index_entry_t(1, heis_coupling_specs.size());
+        heis_coupling_specs.push_back({name, rel_vecs, J});
+    }
+
+    void MC_runner::define_biquad_coupling(const std::string& name,
+            const std::vector<std::vector<ipos_t>>& rel_vecs,
+            const double K
+            ){
+        if (index.contains(name))
+            throw std::logic_error("Coupling names must be unique");
+
+        index[name] = index_entry_t(2, biquad_coupling_specs.size());
+        biquad_coupling_specs.push_back({name, rel_vecs, K});
+        // index is literally only used here: consider deleting
     }
 
 
@@ -80,37 +170,54 @@ namespace CMC {
         for (auto& s : spin_list) {h += s->S;}
     }
 
-    double norm(const vector3::vec3d& v){
-        return sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
-    }
-
-    vector3::vec3d MC_runner::local_field(const HeisenbergSpin *spin) const
+    vector3::vec3d MC_runner::local_linear_field(const HeisenbergSpin *spin) const
     {
         vector3::vec3d h_loc{0,0,0};
-        for (const auto& shell : spin->bond_shells) {
+        for (const auto& shell : spin->general_bonds) {
             vector3::vec3d tmp{0,0,0};
             accumulate_field(tmp, shell.bonds);
-            h_loc += *shell.J * tmp;
+            h_loc += *shell.J * tmp; // this is a matrix-vector operation
+        }
+        for (const auto& shell : spin->heis_bonds) {
+            vector3::vec3d tmp{0,0,0};
+            accumulate_field(tmp, shell.bonds);
+            h_loc += *shell.J * tmp; // simple scalar multiplication
         }
         return h_loc;
     }
 
-    void mirror_about_vector(vector3::vec3d& v, const vector3::vec3d& axis){
-        v = -v + 2 *(dot(axis, v) / (dot(axis, axis) + 1e-10) ) * axis;
+
+    vector3::vec3d MC_runner::local_field(const HeisenbergSpin *spin) const 
+    {
+        auto h_loc = local_linear_field(spin);
+        for (const auto& shell : spin->biquad_bonds) {
+            vector3::vec3d tmp{0,0,0};
+            for (auto& other : shell.bonds){
+                tmp += dot(other->S, spin->S)*other->S;
+            }
+            h_loc += *shell.K * tmp;
+        }
+        return h_loc;
     }
 
-    void rotate_about_vector(vector3::vec3d& v, const vector3::vec3d& axis, double theta){
-        // generates a random vector with fixed projection onto axis
-        double c = std::cos(theta);
-        double s = std::sin(theta);
-        double norm2 = dot(axis, axis);
-        // Rodruigez formula
-        v = c * v + ((1-c)/norm2) * dot(axis, v) * axis + (s / sqrt(norm2)) * cross(axis, v);
+    double MC_runner::biquad_site_energy(const HeisenbergSpin* spin,
+            const vector3::vec3d& S) const
+    {
+        double E = 0;
+        for (const auto& shell : spin->biquad_bonds) {
+            double acc = 0;
+            for (const auto* other : shell.bonds) {
+                double d = dot(S, other->S);
+                acc += d * d;
+            }
+            E += 0.5 * (*shell.K) * acc;  // K/2 convention (see local_field)
+        }
+        return E;
     }
 
     size_t MC_runner::local_Metropolis(double T, HeisenbergSpin* spin)
     {
-        auto h_loc = local_field(spin) - global_field;
+        auto h_loc = local_linear_field(spin) - global_field;
         double curr_E = dot(spin->S, h_loc);
 
         auto new_S = sqrt(T/settings.T_ref) * vector3::vec3d(
@@ -120,7 +227,9 @@ namespace CMC {
 
         double new_E = dot(new_S, h_loc);
 
-        double dE = new_E - curr_E;
+        double dE = (new_E - curr_E)
+                  + biquad_site_energy(spin, new_S)
+                  - biquad_site_energy(spin, spin->S);
         if (dE < 0 || rand01(rng) < exp(-dE / T)) {
             spin->S = new_S;
             return 1;
@@ -129,27 +238,60 @@ namespace CMC {
         return 0;
     }
 
-    // overrelaxes proportion p of the spins
-    void MC_runner::overrelax_some(double p){
-        auto& spins = lat->get_objects<HeisenbergSpin>();
+    // // overrelaxes proportion p of the spins
+    // void MC_runner::overrelax_some(double p){
+    //     auto& spins = lat->get_objects<HeisenbergSpin>();
+    //
+    //     for (int i=0; i<p*spins.size(); ++i) {
+    //         auto* spin = &spins[site_dist(rng)];
+    //         auto h_loc = local_field(spin) - global_field;
+    //         mirror_about_vector(spin->S, h_loc);
+    //     }
+    // }
 
-        for (int i=0; i<p*spins.size(); ++i) {
-            auto* spin = &spins[site_dist(rng)];
-            auto h_loc = local_field(spin) - global_field;
-            mirror_about_vector(spin->S, h_loc);
+
+    size_t MC_runner::local_overrelax(double T, HeisenbergSpin* spin){
+        auto h_loc = local_linear_field(spin) - global_field;
+
+        // Rotation about a vanishing field is undefined (rotate_about_vector
+        // divides by ‖h_loc‖²). This happens when a spin's neighbours are all
+        // zero — e.g. spins not yet bootstrapped off the zero-initialised state,
+        // which the lifted step cannot always move. Treat it as a no-op identity
+        // move; the Metropolis/lifted step will orient the spin later.
+        if (norm(h_loc) < settings.hloc_atol)
+            return 0;
+
+        // Rotation about h_loc leaves the linear single-site energy S·h_loc
+        // invariant, so with no biquad terms the move is microcanonical and
+        // always accepted (bit-for-bit the previous behaviour, zero overhead).
+        if (spin->biquad_bonds.empty()) {
+            rotate_about_vector(spin->S, h_loc, 2*M_PI*rand01(rng));
+            return 1;
         }
+
+        // Biquadratic terms are not conserved by the rotation; the proposal is
+        // symmetric (uniform angle), so a plain Metropolis test on the biquad
+        // residual restores detailed balance.
+        auto old_S = spin->S;
+        double old_bq = biquad_site_energy(spin, old_S);
+        rotate_about_vector(spin->S, h_loc, 2*M_PI*rand01(rng));
+        double dE = biquad_site_energy(spin, spin->S) - old_bq;
+        if (dE <= 0 || rand01(rng) < exp(-dE / T))
+            return 1;
+        spin->S = old_S;
+        return 0;
     }
 
 
-    // overrelaxes proportion p of the spins
-    void MC_runner::overrelax_all(){
+    // overrelaxes all the spins
+    size_t MC_runner::overrelax_all(double T){
         auto& spins = lat->get_objects<HeisenbergSpin>();
-
+        size_t accepted = 0;
         for (size_t i=0; i<spins.size(); ++i) {
             auto* spin = &spins[i];
-            auto h_loc = local_field(spin) - global_field;
-            rotate_about_vector(spin->S, h_loc, 2*M_PI*rand01(rng));
+            accepted += local_overrelax(T, spin);
         }
+        return accepted;
     }
 
     size_t MC_runner::sweep_local_Metropolis(double T, size_t n_overrelax){
@@ -158,7 +300,7 @@ namespace CMC {
             accepted += local_Metropolis(T, &spin);
         }
         for (size_t i=0; i<n_overrelax; i++)
-            overrelax_all();
+            overrelax_all(T);
         return accepted;
     }
 
@@ -193,7 +335,7 @@ namespace CMC {
     // crossing is detected by the axis flipping orientation, dot(a(S),a(S_new))<0.
     size_t MC_runner::local_lifted_Metropolis_rot(double T, HeisenbergSpin* spin)
     {
-        auto h_loc = local_field(spin) - global_field;
+        auto h_loc = local_linear_field(spin) - global_field;
         double curr_E = dot(spin->S, h_loc);
 
         double delta = sqrt(T / settings.T_ref);
@@ -230,8 +372,12 @@ namespace CMC {
             return 0;
         }
 
-        double dE = dot(new_S, h_loc) - curr_E;
+        double dE = dot(new_S, h_loc) - curr_E
+                  + biquad_site_energy(spin, new_S)
+                  - biquad_site_energy(spin, spin->S);
         // Skewed-detailed-balance acceptance min(1, [sinψ_new/sinψ_old]·e^{-ΔE/T}).
+        // The biquad residual enters only through the symmetric energy, so the
+        // linear-field Jacobian (axis-length ratio) is unchanged.
         // rand01 < (ratio ≥ 1) is always true, so no explicit clamp is needed.
         double accept_ratio = sqrt(axis_n2_new / axis_n2_old) * exp(-dE / T);
         if (rand01(rng) < accept_ratio) {
@@ -247,20 +393,27 @@ namespace CMC {
     // Propose S-> S + delta*h,
     // where delta has the sign of lifted_dir
     size_t MC_runner::local_lifted_Metropolis(double T, HeisenbergSpin* spin){
-        auto h_loc = local_field(spin) - global_field;
+        auto h_loc = local_linear_field(spin) - global_field;
         double curr_E = dot(spin->S, h_loc);
 
-        auto h_loc_hat = h_loc;
-        h_loc_hat /= norm(h_loc);
-        double u = dot(h_loc_hat, spin->S);
+        auto n_hloc= norm(h_loc);
+        // early guard in case h_loc = 0
+        if (n_hloc < settings.hloc_atol)
+            return local_Metropolis(T, spin);
 
+        auto h_loc_hat = h_loc; h_loc_hat /= n_hloc;
+        // u = cos∠(S, h_loc) ∈ [-1,1] mathematically, but the dot product of two
+        // unit vectors can round to 1+ε when S ∥ h_loc. Clamp so that 1-u*u stays
+        // non-negative; otherwise sqrt((1-new_u²)/(1-u*u)) below yields NaN. The
+        // near-pole guard (abs(1-u*u) < u_atol) then rejects the degenerate case.
+        double u = std::clamp(dot(h_loc_hat, spin->S), -1.0, 1.0);
 
         double du =  spin->lifted_dir * sqrt(T / settings.T_ref) * exp_dist(rng);
 
         double new_u = u+du;
 
         // ensure that we did not move off the sphere
-        if (new_u > 1 || new_u < -1 || abs(1-u*u) < 1e-16){
+        if (new_u > 1 || new_u < -1 || abs(1-u*u) < settings.u_atol){
             spin->lifted_dir = -spin->lifted_dir;
             return 0;
         }
@@ -268,7 +421,9 @@ namespace CMC {
         auto new_S = new_u * h_loc_hat + sqrt( (1-new_u*new_u)/ (1-u*u) ) * (spin->S - u*h_loc_hat);
         new_S /= norm(new_S);
 
-        double dE = dot(new_S, h_loc) - curr_E;
+        double dE = dot(new_S, h_loc) - curr_E
+                  + biquad_site_energy(spin, new_S)
+                  - biquad_site_energy(spin, spin->S);
 
         double accept_ratio =  exp(-dE / T);
         if (rand01(rng) < accept_ratio) {
@@ -286,7 +441,7 @@ namespace CMC {
             accepted += local_lifted_Metropolis(T, &spin);
         }
         for (size_t n=0; n<n_overrelax; n++)
-            overrelax_all();
+            overrelax_all(T);
 
         return accepted;
     }
@@ -297,7 +452,7 @@ namespace CMC {
             accepted += local_lifted_Metropolis_rot(T, &spin);
         }
         for (size_t n=0; n<n_overrelax; n++)
-            overrelax_all();
+            overrelax_all(T);
 
         return accepted;
     }
@@ -305,7 +460,8 @@ namespace CMC {
     double MC_runner::total_energy_per_unit_cell() const{
         double E = 0;
         for (const auto& s : std::get<std::vector<HeisenbergSpin>>(lat->objects)){
-            E += 0.5 * dot(s.S, local_field(&s));
+            E += 0.5 * dot(s.S, local_linear_field(&s));
+            E += 0.5 * biquad_site_energy(&s, s.S);
             E -= dot(s.S, global_field);
         }
         return E / lat->lattice.num_primitive_cells();
