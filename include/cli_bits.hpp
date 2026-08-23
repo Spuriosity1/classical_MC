@@ -233,6 +233,7 @@ inline auto name_LJ123(const argparse::ArgumentParser& prog){
     auto J2 = prog.get<double>("--J2");
     auto J3 = resolve_J3(prog);
     auto Delta = prog.get<double>("--Delta");
+    auto K = prog.get<double>("--K");
     int L = prog.get<int>("L");
 
     std::stringstream name;
@@ -240,7 +241,8 @@ inline auto name_LJ123(const argparse::ArgumentParser& prog){
         "J1="<<J1<<DELIM<<
         "J2="<<J2<<DELIM<<
         "J3="<<J3<<DELIM<<
-        "Delta="<<Delta<<DELIM;
+        "Delta="<<Delta<<DELIM<<
+        "K="<<K<<DELIM;
     if (prog.is_used("--Q")) {
         double Qz_rounded = round_Qz_to_supercell(prog.get<double>("--Q"), L);
         name << "Q="<<Qz_rounded<<DELIM;

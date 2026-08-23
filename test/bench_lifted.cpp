@@ -61,11 +61,12 @@ void randomise_spins(Lattice& lat, std::mt19937_64& rng) {
     }
 }
 
-MC_runner make_runner(Lattice& lat, double J1, double J2, double T_ref,
+MC_runner make_runner(Lattice& lat, double J1, double J2, double K, double T_ref,
                       uint64_t seed) {
     MC_runner mc(lat, seed);
     mc.define_general_coupling("J1", j1_dist, J1 * Heis);
     mc.define_general_coupling("J2", j2_dist, J2 * Heis);
+    mc.define_biquad_coupling("K", j1_dist, K);
     mc.settings.T_ref = T_ref;
     mc.setup_lattice();
     return mc;
@@ -150,6 +151,10 @@ int main(int argc, char* argv[]) {
         .help("Next-nearest-neighbour Heisenberg coupling (default +0.3)")
         .default_value(0.3)
         .scan<'g', double>();
+    prog.add_argument("--K")
+        .help("Nearest-neighbour biquadratic coupling (default 0)")
+        .default_value(0.0)
+        .scan<'g', double>();
     prog.add_argument("--T")
         .help("Temperature at which to compare the two samplers")
         .default_value(0.5)
@@ -189,6 +194,7 @@ int main(int argc, char* argv[]) {
 
     const double J1 = prog.get<double>("--J1");
     const double J2 = prog.get<double>("--J2");
+    const double K = prog.get<double>("--K");
     const double T = prog.get<double>("--T");
     const double T_ref = prog.get<double>("--T_ref");
     const int L = prog.get<int>("--L");
@@ -228,7 +234,7 @@ int main(int argc, char* argv[]) {
     Lattice lat_std = build_supercell(cell_spec, supercell_spec);
     std::mt19937_64 init_std(seed_std_init);
     randomise_spins(lat_std, init_std);
-    MC_runner mc_std = make_runner(lat_std, J1, J2, T_ref, seed_std_mc);
+    MC_runner mc_std = make_runner(lat_std, J1, J2, K, T_ref, seed_std_mc);
     std::printf("Running standard Metropolis...\n");
     Estimates est_std = run_sampler(lat_std, mc_std, /*lifted=*/false, T, n_burn,
                                     n_sample);
@@ -237,7 +243,7 @@ int main(int argc, char* argv[]) {
     Lattice lat_lft = build_supercell(cell_spec, supercell_spec);
     std::mt19937_64 init_lft(seed_lft_init);
     randomise_spins(lat_lft, init_lft);
-    MC_runner mc_lft = make_runner(lat_lft, J1, J2, T_ref, seed_lft_mc);
+    MC_runner mc_lft = make_runner(lat_lft, J1, J2, K, T_ref, seed_lft_mc);
     std::printf("Running lifted Metropolis...\n");
     Estimates est_lft = run_sampler(lat_lft, mc_lft, /*lifted=*/true, T, n_burn,
                                     n_sample);
