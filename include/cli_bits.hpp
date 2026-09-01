@@ -61,9 +61,9 @@ inline auto provide_physical_args(argparse::ArgumentParser& prog){
         .choices(0,1,2)
         .default_value(2)
         .scan<'i', int>();
-    prog.add_argument("--Delta")
-        .help("Nearest-neighbour XXZ anisotropy (local [111] frame): Jz = Delta*J1, Jperp = J1. "
-              "Delta=1 is isotropic Heisenberg.")
+    prog.add_argument("--Jzz")
+        .help("Nearest-neighbour XXZ anisotropy (local [111] frame),  Jzz * Sz Sz."
+              "Jzz=0 is isotropic Heisenberg.")
         .default_value(1.0)
         .scan<'g', double>();
     prog.add_argument("--external_field", "-B")
@@ -161,16 +161,16 @@ inline auto build_J1J2J3_h(const argparse::ArgumentParser& prog, CMC::Lattice& l
         printf("Using Q=%.10g along axis %d -> J3=%.10g\n", Qz_rounded, axis, J3);
     }
 
-    auto Delta = prog.get<double>("--Delta");
+    auto Jzz = prog.get<double>("--Jzz");
 
     CMC::MC_runner mc(lat, hash_true_random(seed));
 
     // J1 as six sublattice-pair specs for local-frame XXZ: exactly the six
     // nn1 bonds of one tetrahedron, declared once each (de-duplicated).
     // For pair (mu, nu) with mu < nu, the source-applied matrix is
-    //   J_spec = J1 * [I + (Delta-1) * z_mu ⊗ z_nu],
+    //   J_spec = J1 * I + Jzz * z_mu ⊗ z_nu.
     // so the lower-sublattice (source) field is h_mu += J_spec * S_nu, giving the
-    // bond energy J1[ S_mu·S_nu + (Delta-1)(S_mu·z_mu)(S_nu·z_nu) ]. The target
+    // bond energy J1 S_mu·S_nu + Jzz (S_mu·z_mu)(S_nu·z_nu) . The target
     // (nu) endpoint references J_spec^T (stored as CouplingSpec::Jt).
     {
         using vec3d = vector3::vec3<double>;
@@ -189,10 +189,10 @@ inline auto build_J1J2J3_h(const argparse::ArgumentParser& prog, CMC::Lattice& l
             auto v2a = [](vec3d v) -> std::array<double,3> {
                 return {v[0], v[1], v[2]};
             };
-            mat33d Ising = mat33d::from_cols(
+            mat33d local_Ising = mat33d::from_cols(
                 v2a(z_nu[0] * z_mu), v2a(z_nu[1] * z_mu), v2a(z_nu[2] * z_mu));
             std::string pname = "J1_" + std::to_string(mu) + std::to_string(nu);
-            mc.define_general_coupling(pname, *nn1_pairs[k], J1*(Delta-1) * Ising + J1*coupling::Heis);
+            mc.define_general_coupling(pname, *nn1_pairs[k], Jzz * local_Ising + J1*coupling::Heis);
         }
     }
     mc.define_Heisenberg_coupling("J2", pyrochlore::nn2_dist, J2);
@@ -232,7 +232,7 @@ inline auto name_LJ123(const argparse::ArgumentParser& prog){
     auto J1 = prog.get<double>("--J1");
     auto J2 = prog.get<double>("--J2");
     auto J3 = resolve_J3(prog);
-    auto Delta = prog.get<double>("--Delta");
+    auto Jzz = prog.get<double>("--Jzz");
     auto K = prog.get<double>("--K");
     int L = prog.get<int>("L");
 
@@ -241,7 +241,7 @@ inline auto name_LJ123(const argparse::ArgumentParser& prog){
         "J1="<<J1<<DELIM<<
         "J2="<<J2<<DELIM<<
         "J3="<<J3<<DELIM<<
-        "Delta="<<Delta<<DELIM<<
+        "Jzz="<<Jzz<<DELIM<<
         "K="<<K<<DELIM;
     if (prog.is_used("--Q")) {
         double Qz_rounded = round_Qz_to_supercell(prog.get<double>("--Q"), L);

@@ -31,7 +31,7 @@ struct LTBond {
 static vector<LTBond> build_bonds(
         LatticeIndexing& lat,
         const vector<ipos_t>& sl_pos,
-        double J1, double J2, double J3, double Delta)
+        double J1, double J2, double J3, double Jzz)
 {
     using DistTable = const vector<vector<ipos_t>>;
     // {coupling strength, distance table, is_J1 (XXZ applies only to J1)}
@@ -59,7 +59,7 @@ static vector<LTBond> build_bonds(
                 assert(beta >= 0 && "bond target not found in sl_positions");
 
                 Eigen::Matrix3d J_mat;
-                if (xxz && Delta != 1.0) {
+                if (xxz && Jzz != 0.0) {
                     // J_bond = j·[I + (Delta-1)·ẑ_μ ⊗ ẑ_ν]
                     // where μ = pyro_sl of source, ν = pyro_sl of target
                     int mu = sl   % 4;
@@ -68,8 +68,8 @@ static vector<LTBond> build_bonds(
                     const auto& zn = pyrochlore::axis[nu][2];
                     Eigen::Vector3d z_mu(zm[0], zm[1], zm[2]);
                     Eigen::Vector3d z_nu(zn[0], zn[1], zn[2]);
-                    J_mat = j * (Eigen::Matrix3d::Identity()
-                                 + (Delta - 1.0) * z_mu * z_nu.transpose());
+                    J_mat = j * Eigen::Matrix3d::Identity()
+                                 + Jzz * z_mu * z_nu.transpose();
                 } else {
                     J_mat = j * Eigen::Matrix3d::Identity();
                 }
@@ -109,7 +109,7 @@ int main(int argc, char* argv[])
     const double J1    = prog.get<double>("--J1");
     const double J2    = prog.get<double>("--J2");
     const double J3    = resolve_J3(prog);
-    const double Delta = prog.get<double>("--Delta");
+    const double Jzz = prog.get<double>("--Jzz");
 
     // Build LatticeIndexing directly — no Supercell<HeisenbergSpin> needed.
     const int L = prog.get<int>("L");
@@ -132,7 +132,7 @@ int main(int argc, char* argv[])
 
     const int Nk           = lat.num_primitive_cells();
     const ivec3_t k_dims   = lat.size();
-    const auto bonds       = build_bonds(lat, sl_pos, J1, J2, J3, Delta);
+    const auto bonds       = build_bonds(lat, sl_pos, J1, J2, J3, Jzz);
 
     // -----------------------------------------------------------------------
     // Sweep BZ: build M(k) and track minimum eigenvalue
